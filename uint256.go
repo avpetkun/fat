@@ -405,6 +405,254 @@ func (x Uint256) CmpBig(y *big.Int) int {
 	return c
 }
 
+// --- bits -----------------------------------------------
+
+// BitLen returns the length of x in bits, 0 for zero
+func (x Uint256) BitLen() int {
+	// conditional moves instead of a branch on the top limb
+	n := bits.Len64(x.L0)
+	if x.L1 != 0 {
+		n = 64 + bits.Len64(x.L1)
+	}
+	if x.L2 != 0 {
+		n = 128 + bits.Len64(x.L2)
+	}
+	if x.L3 != 0 {
+		n = 192 + bits.Len64(x.L3)
+	}
+	return n
+}
+
+// LeadingZeros returns the number of leading zero bits in x, 256 for x == 0
+func (x Uint256) LeadingZeros() int {
+	// conditional moves on counts made before the ifs,
+	// k - Len64 folds into CLZ and inlines cheaper than LeadingZeros64
+	z0 := 256 - bits.Len64(x.L0)
+	z1 := 192 - bits.Len64(x.L1)
+	z2 := 128 - bits.Len64(x.L2)
+	n := 64 - bits.Len64(x.L3)
+	if x.L1 == 0 {
+		z1 = z0
+	}
+	if x.L2 == 0 {
+		z2 = z1
+	}
+	if x.L3 == 0 {
+		n = z2
+	}
+	return n
+}
+
+// TrailingZeros returns the number of trailing zero bits in x, 256 for x == 0
+func (x Uint256) TrailingZeros() int {
+	// conditional moves, less latency than masks in our benchmarks
+	n := 192 + bits.TrailingZeros64(x.L3)
+	if x.L2 != 0 {
+		n = 128 + bits.TrailingZeros64(x.L2)
+	}
+	if x.L1 != 0 {
+		n = 64 + bits.TrailingZeros64(x.L1)
+	}
+	if x.L0 != 0 {
+		n = bits.TrailingZeros64(x.L0)
+	}
+	return n
+}
+
+// OnesCount returns the number of one bits in x
+func (x Uint256) OnesCount() int {
+	return bits.OnesCount64(x.L0) + bits.OnesCount64(x.L1) + bits.OnesCount64(x.L2) + bits.OnesCount64(x.L3)
+}
+
+// Lsh returns x << n, it panics for n < 0
+func (x Uint256) Lsh(n int) Uint256 {
+	if n < 0 {
+		panic("fat.Uint256.Lsh: negative shift")
+	}
+	// the plain lsh is too big to inline
+	return x.lsh(uint64(n))
+}
+
+// lsh is Lsh for any n
+func (x Uint256) lsh(n uint64) Uint256 {
+	// bits within limbs, then whole limbs by conditional moves, no branch on n
+	s, t := n&63, ^n&63
+	// >>1>>t is >>(64-s) that gives 0 at s = 0
+	r3 := x.L3<<s | x.L2>>1>>t
+	r2 := x.L2<<s | x.L1>>1>>t
+	r1 := x.L1<<s | x.L0>>1>>t
+	r0 := x.L0 << s
+	if n&64 != 0 {
+		r3, r2, r1, r0 = r2, r1, r0, 0
+	}
+	// n > 127 for n&128 saves an AND, a wider n zeros all the limbs below
+	if n > 127 {
+		r3, r2, r1, r0 = r1, r0, 0, 0
+	}
+	if n > 255 {
+		r3, r2 = 0, 0
+	}
+	return Uint256{r0, r1, r2, r3}
+}
+
+// Rsh returns x >> n, it panics for n < 0
+func (x Uint256) Rsh(n int) Uint256 {
+	if n < 0 {
+		panic("fat.Uint256.Rsh: negative shift")
+	}
+	// the plain rsh is too big to inline
+	return x.rsh(uint64(n))
+}
+
+// rsh is Rsh for any n
+func (x Uint256) rsh(n uint64) Uint256 {
+	// bits within limbs, then whole limbs by conditional moves, no branch on n
+	s, t := n&63, ^n&63
+	// <<1<<t is <<(64-s) that gives 0 at s = 0
+	r0 := x.L0>>s | x.L1<<1<<t
+	r1 := x.L1>>s | x.L2<<1<<t
+	r2 := x.L2>>s | x.L3<<1<<t
+	r3 := x.L3 >> s
+	if n&64 != 0 {
+		r0, r1, r2, r3 = r1, r2, r3, 0
+	}
+	// n > 127 for n&128 saves an AND, a wider n zeros all the limbs below
+	if n > 127 {
+		r0, r1, r2, r3 = r2, r3, 0, 0
+	}
+	if n > 255 {
+		r0, r1 = 0, 0
+	}
+	return Uint256{r0, r1, r2, r3}
+}
+
+// RotateLeft returns x rotated left by k mod 256 bits, right for k < 0
+func (x Uint256) RotateLeft(k int) Uint256 {
+	// limbs by conditional moves, then bits within limbs:
+	// k&192 and k&63 are k mod 256 for any sign
+	s, t := uint(k)&63, uint(^k)&63
+	l0, l1, l2, l3 := x.L0, x.L1, x.L2, x.L3
+	if k&64 != 0 {
+		l0, l1, l2, l3 = l3, l0, l1, l2
+	}
+	if k&128 != 0 {
+		l0, l1, l2, l3 = l2, l3, l0, l1
+	}
+	// >>1>>t is >>(64-s) that gives 0 at s = 0
+	return Uint256{l0<<s | l3>>1>>t, l1<<s | l0>>1>>t, l2<<s | l1>>1>>t, l3<<s | l2>>1>>t}
+}
+
+// RotateRight returns x rotated right by k mod 256 bits
+func (x Uint256) RotateRight(k int) Uint256 {
+	// a copy of RotateLeft by -k, the call to it costs a stack frame
+	k = -k
+	s, t := uint(k)&63, uint(^k)&63
+	l0, l1, l2, l3 := x.L0, x.L1, x.L2, x.L3
+	if k&64 != 0 {
+		l0, l1, l2, l3 = l3, l0, l1, l2
+	}
+	if k&128 != 0 {
+		l0, l1, l2, l3 = l2, l3, l0, l1
+	}
+	return Uint256{l0<<s | l3>>1>>t, l1<<s | l0>>1>>t, l2<<s | l1>>1>>t, l3<<s | l2>>1>>t}
+}
+
+// Reverse returns x with its bits in reverse order
+func (x Uint256) Reverse() Uint256 {
+	return Uint256{bits.Reverse64(x.L3), bits.Reverse64(x.L2), bits.Reverse64(x.L1), bits.Reverse64(x.L0)}
+}
+
+// ReverseBytes returns x with its bytes in reverse order
+func (x Uint256) ReverseBytes() Uint256 {
+	return Uint256{bits.ReverseBytes64(x.L3), bits.ReverseBytes64(x.L2), bits.ReverseBytes64(x.L1), bits.ReverseBytes64(x.L0)}
+}
+
+// Xor returns x ^ y
+func (x Uint256) Xor(y Uint256) Uint256 {
+	x.L0 ^= y.L0
+	x.L1 ^= y.L1
+	x.L2 ^= y.L2
+	x.L3 ^= y.L3
+	return x
+}
+
+// And returns x & y
+func (x Uint256) And(y Uint256) Uint256 {
+	x.L0 &= y.L0
+	x.L1 &= y.L1
+	x.L2 &= y.L2
+	x.L3 &= y.L3
+	return x
+}
+
+// AndNot returns x &^ y
+func (x Uint256) AndNot(y Uint256) Uint256 {
+	x.L0 &^= y.L0
+	x.L1 &^= y.L1
+	x.L2 &^= y.L2
+	x.L3 &^= y.L3
+	return x
+}
+
+// Or returns x | y
+func (x Uint256) Or(y Uint256) Uint256 {
+	x.L0 |= y.L0
+	x.L1 |= y.L1
+	x.L2 |= y.L2
+	x.L3 |= y.L3
+	return x
+}
+
+// Not returns ^x
+func (x Uint256) Not() Uint256 {
+	x.L0 = ^x.L0
+	x.L1 = ^x.L1
+	x.L2 = ^x.L2
+	x.L3 = ^x.L3
+	return x
+}
+
+// Bit returns bit i of x, 0 past bit 255, it panics for i < 0
+func (x Uint256) Bit(i int) uint {
+	if i < 0 {
+		panic("fat.Uint256.Bit: negative index")
+	}
+	u := uint64(i)
+	// conditional moves keep x in registers
+	lo, hi := x.L0, x.L2
+	if u&64 != 0 {
+		lo, hi = x.L1, x.L3
+	}
+	// u > 127 for u&128 saves an AND, past bit 255 the limb is 0
+	if u > 127 {
+		lo = hi
+	}
+	if u > 255 {
+		lo = 0
+	}
+	return uint(lo >> (u & 63) & 1)
+}
+
+// WithBit returns x with bit i set to bit, a bit past 255 is dropped.
+// It panics for i < 0 and for bit > 1
+func (x Uint256) WithBit(i int, bit uint) Uint256 {
+	if i < 0 {
+		panic("fat.Uint256.WithBit: negative index")
+	}
+	if bit > 1 {
+		panic("fat.Uint256.WithBit: bit not 0 or 1")
+	}
+	u := uint64(i)
+	// a shift past 63 gives 0: only the limb holding the bit gets a mask,
+	// past 255 none does
+	b := -uint64(bit)
+	x.L0 ^= (x.L0 ^ b) & (1 << u)
+	x.L1 ^= (x.L1 ^ b) & (1 << (u - 64))
+	x.L2 ^= (x.L2 ^ b) & (1 << (u - 128))
+	x.L3 ^= (x.L3 ^ b) & (1 << (u - 192))
+	return x
+}
+
 // --- add ------------------------------------------------
 
 // Add returns x + y, it panics on overflow

@@ -20,6 +20,9 @@ var (
 	BigMaxInt256 = new(big.Int).Sub(Two255, Big1)
 )
 
+// Shifts256 are shift counts around each limb and past the width
+var Shifts256 = []int{0, 1, 2, 31, 62, 63, 64, 65, 66, 100, 126, 127, 128, 129, 130, 190, 191, 192, 193, 254, 255, 256, 257, 300, 320, 384, 448, 512}
+
 // RefU256 returns x as an unsigned big.Int
 func RefU256[T Shape256](x T) *big.Int {
 	v := struct{ L0, L1, L2, L3 uint64 }(x)

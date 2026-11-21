@@ -9,6 +9,12 @@ import (
 type Num[T any] interface {
 	comparable
 	IsZero() bool
+	BitLen() int
+	Bit(i int) uint
+	WithBit(i int, bit uint) T
+	Lsh(n int) T
+	Rsh(n int) T
+	Not() T
 	Cmp(y T) int
 	LessThan(y T) bool
 	LessOrEqual(y T) bool
@@ -43,11 +49,14 @@ type Kind[T Num[T]] struct {
 	Wrap     func(*big.Int) *big.Int
 	Fits     func(*big.Int) bool
 	FromBig  func(*big.Int) T
+	Zero     T
 	Max, Min T
 	Values   func(func(T))
 	Pairs    func(func(x, y T))
 	// Narrow cuts y to width bits and extends it back, by zeros or by its sign
 	Narrow func(y T, width int) T
+	Shifts []int
+	BitIdx []int
 	// CmpMore checks the comparisons only this type has, nil for none
 	CmpMore func(t testing.TB, x, y T, xb *big.Int)
 	// Ops64 are the methods with a 64-bit operand

@@ -361,6 +361,107 @@ func (x Int128) CmpBig(y *big.Int) int {
 	return x.Cmp(y128)
 }
 
+// --- bits -----------------------------------------------
+
+// BitLen returns the length of |x| in bits, 0 for zero
+func (x Int128) BitLen() int {
+	// |x| by conditional moves, right even for MinInt128
+	return x.UnsignedAbs().BitLen()
+}
+
+// Lsh returns x << n, it panics for n < 0
+func (x Int128) Lsh(n int) Int128 {
+	if n < 0 {
+		panic("fat.Int128.Lsh: negative shift")
+	}
+	// a copy of Uint128.Lsh, a conversion wrapper exceeds the inline budget
+	s, t := n&63, ^n&63
+	r1 := x.L1<<s | x.L0>>1>>t
+	r0 := x.L0 << s
+	if n&64 != 0 {
+		r1, r0 = r0, 0
+	}
+	// nothing is left past 127 bits
+	if n > 127 {
+		r1, r0 = 0, 0
+	}
+	return Int128{r0, r1}
+}
+
+// Rsh returns x >> n rounded toward negative infinity, it panics for n < 0
+func (x Int128) Rsh(n int) Int128 {
+	if n < 0 {
+		panic("fat.Int128.Rsh: negative shift")
+	}
+	// as Uint128.Rsh with the sign as fill, past 127 bits only the sign is left
+	n = min(n, 127)
+	s, t := n&63, ^n&63
+	r0 := x.L0>>s | x.L1<<1<<t
+	r1 := uint64(int64(x.L1) >> s)
+	if n&64 != 0 {
+		r0, r1 = r1, uint64(int64(x.L1)>>63)
+	}
+	return Int128{r0, r1}
+}
+
+// Xor returns x ^ y
+func (x Int128) Xor(y Int128) Int128 {
+	return Int128(Uint128(x).Xor(Uint128(y)))
+}
+
+// And returns x & y
+func (x Int128) And(y Int128) Int128 {
+	return Int128(Uint128(x).And(Uint128(y)))
+}
+
+// AndNot returns x &^ y
+func (x Int128) AndNot(y Int128) Int128 {
+	return Int128(Uint128(x).AndNot(Uint128(y)))
+}
+
+// Or returns x | y
+func (x Int128) Or(y Int128) Int128 {
+	return Int128(Uint128(x).Or(Uint128(y)))
+}
+
+// Not returns ^x
+func (x Int128) Not() Int128 {
+	return Int128(Uint128(x).Not())
+}
+
+// Bit returns bit i of x in two's complement, the sign bit past 127.
+// It panics for i < 0
+func (x Int128) Bit(i int) uint {
+	if i < 0 {
+		panic("fat.Int128.Bit: negative index")
+	}
+	// past bit 127 every bit is the sign
+	u := min(uint64(i), 127)
+	// the limb by a conditional move, x stays in registers
+	w := x.L0
+	if u&64 != 0 {
+		w = x.L1
+	}
+	return uint(w >> (u & 63) & 1)
+}
+
+// WithBit returns x with bit i set to bit, a bit past 127 is dropped.
+// It panics for i < 0 and for bit > 1
+func (x Int128) WithBit(i int, bit uint) Int128 {
+	if i < 0 {
+		panic("fat.Int128.WithBit: negative index")
+	}
+	if bit > 1 {
+		panic("fat.Int128.WithBit: bit not 0 or 1")
+	}
+	u := uint64(i)
+	// a shift past 63 is 0: only the limb of bit i gets a mask, none past 127
+	b := -uint64(bit)
+	x.L0 ^= (x.L0 ^ b) & (1 << u)
+	x.L1 ^= (x.L1 ^ b) & (1 << (u - 64))
+	return x
+}
+
 // --- add ------------------------------------------------
 
 // signed overflow of the o forms: the operands share a sign the result lacks

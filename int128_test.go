@@ -2,6 +2,7 @@ package fat
 
 import (
 	"math/big"
+	"sync"
 	"testing"
 
 	"github.com/avpetkun/fat/internal/require"
@@ -72,7 +73,175 @@ func TestInt128Arith(t *testing.T) {
 		{Name: "Sub", Width: 128, Fn: Plain(Int128.Sub), Ref: BigSub, Panic: "fat.Int128.Sub: overflow"},
 		{Name: "Subu", Width: 128, Fn: Plain(Int128.Subu), Ref: BigSub},
 		{Name: "Subo", Width: 128, Fn: Int128.Subo, Ref: BigSub, Over: true},
+
+		{Name: "And", Width: 128, Fn: Plain(Int128.And), Ref: BigAnd},
+		{Name: "Or", Width: 128, Fn: Plain(Int128.Or), Ref: BigOr},
+		{Name: "Xor", Width: 128, Fn: Plain(Int128.Xor), Ref: BigXor},
+		{Name: "AndNot", Width: 128, Fn: Plain(Int128.AndNot), Ref: BigAndNot},
 	})
+}
+
+// BenchmarkInt128 measures the methods on 2^18 values, random length and sign.
+// Add, Mul and DivMod/fit take pairs whose results fit
+func BenchmarkInt128(b *testing.B) {
+	in := benchI128()
+	b.Run("op=Cmp", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].Cmp(y[i&BenchMask])
+		}
+	})
+	b.Run("op=LessThan", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			SinkBool = x[i&BenchMask].LessThan(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Max", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Max(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Min", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Min(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Cmp64", func(b *testing.B) {
+		x, y := in.i128, in.i64
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].Cmp64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Add", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Add(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Addo", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128, SinkBool = x[i&BenchMask].Addo(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Addu", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Addu(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Subo", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128, SinkBool = x[i&BenchMask].Subo(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Rsh", func(b *testing.B) {
+		x, y := in.i128, in.u64
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Rsh(int(y[i&BenchMask] & 127))
+		}
+	})
+	b.Run("op=Lsh", func(b *testing.B) {
+		x, y := in.i128, in.u64
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Lsh(int(y[i&BenchMask] & 127))
+		}
+	})
+	b.Run("op=Sign", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].Sign()
+		}
+	})
+	b.Run("op=IsPositive", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			SinkBool = x[i&BenchMask].IsPositive()
+		}
+	})
+	b.Run("op=Abs", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Abs()
+		}
+	})
+	b.Run("op=UnsignedAbs", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].UnsignedAbs()
+		}
+	})
+	b.Run("op=BitLen", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].BitLen()
+		}
+	})
+	b.Run("op=Add64o", func(b *testing.B) {
+		x, y := in.i128, in.i64
+		for i := range b.N {
+			sinkI128, SinkBool = x[i&BenchMask].Add64o(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Sub64o", func(b *testing.B) {
+		x, y := in.i128, in.i64
+		for i := range b.N {
+			sinkI128, SinkBool = x[i&BenchMask].Sub64o(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Bit", func(b *testing.B) {
+		x, y := in.i128, in.u64
+		for i := range b.N {
+			SinkUint = x[i&BenchMask].Bit(int(y[i&BenchMask] & 127))
+		}
+	})
+	b.Run("op=WithBit", func(b *testing.B) {
+		x, y := in.i128, in.u64
+		for i := range b.N {
+			v, k := x[i&BenchMask], y[i&BenchMask]
+			sinkI128 = v.WithBit(int(k&127), uint(k>>7&1))
+		}
+	})
+	b.Run("op=PutBig", func(b *testing.B) {
+		x := in.i128
+		r := new(big.Int)
+		for i := range b.N {
+			SinkBig = x[i&BenchMask].PutBig(r)
+		}
+	})
+	b.Run("op=Big", func(b *testing.B) {
+		x := in.i128
+		for i := range b.N {
+			SinkBig = x[i&BenchMask].Big()
+		}
+	})
+	b.Run("op=FromBig", func(b *testing.B) {
+		x := benchBigs128(in.i128)
+		b.ResetTimer()
+		for i := range b.N {
+			sinkI128, _ = Int128FromBig(x[i&BenchMask])
+		}
+	})
+	b.Run("op=CmpBig", func(b *testing.B) {
+		x, y := in.i128, benchBigs128(in.j128)
+		b.ResetTimer()
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].CmpBig(y[i&BenchMask])
+		}
+	})
+}
+
+// benchBigs128 converts x to big.Int values
+func benchBigs128(x []Int128) []*big.Int {
+	r := make([]*big.Int, len(x))
+	for i, v := range x {
+		r[i] = v.Big()
+	}
+	return r
 }
 
 // kI128 describes Int128 to the shared checks of testutil
@@ -83,12 +252,17 @@ var kI128 = Kind[Int128]{
 	Max:     MaxInt128(), Min: MinInt128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowInt128,
+	Shifts: Shifts128,
+	BitIdx: []int{0, 1, 63, 64, 126, 127, 128, 191, 192, 255, 256},
 	Ops64: Ops64[Int128]{
 		New: func(v uint64) Int128 { return NewInt128(int64(v)) }, Cmp: Signed64(Int128.Cmp64),
 		Add: Signed64(Int128.Add64), Sub: Signed64(Int128.Sub64),
 		Addo: Signed64Pair(Int128.Add64o), Subo: Signed64Pair(Int128.Sub64o), Addu: Signed64(Int128.Add64u), Subu: Signed64(Int128.Sub64u),
 	},
 }
+
+// TestInt128Bits checks BitLen, Not, shifts, Bit and WithBit with big.Int
+func TestInt128Bits(t *testing.T) { RunBits(t, kI128) }
 
 // TestInt128Cmp checks Cmp, the comparisons and CmpBig with big.Int
 func TestInt128Cmp(t *testing.T) { RunCmp(t, kI128) }
@@ -104,6 +278,12 @@ func TestInt128Signed(t *testing.T) {
 	RunSigned(t, kI128, func(x Int128) *big.Int { return RefU128(x.UnsignedAbs()) })
 }
 
+// TestInt128BitArgs checks Bit and WithBit at a negative and a huge index
+func TestInt128BitArgs(t *testing.T) { RunBitArgs(t, kI128) }
+
+// TestInt128HugeShifts checks shifts past 128 bits: zero, or the sign for Rsh
+func TestInt128HugeShifts(t *testing.T) { RunHugeShifts(t, kI128) }
+
 // TestInt128PanicText checks that every panic names the method
 func TestInt128PanicText(t *testing.T) { RunPanicText(t, kI128) }
 
@@ -116,6 +296,9 @@ func TestInt128Constants(t *testing.T) {
 	require.Equal(t, -1, x.Cmp64(-4))
 	x = x.Add64(1).Sub64(-3)
 	require.Equal(t, NewInt128(-1), x)
+	require.Equal(t, NewInt128(-8), x.Lsh(3))
+	require.Equal(t, NewInt128(-1), x.Rsh(1))
+	require.Equal(t, uint(1), x.Bit(1))
 }
 
 // narrowInt128 cuts y to width bits, sign-extending into the limb above
@@ -125,3 +308,30 @@ func narrowInt128(y Int128, width int) Int128 {
 	}
 	return y
 }
+
+// --- benchmark inputs -----------------------------------
+
+// sinkI128 and sink2I128 take a benchmark result on each iteration so the work is kept
+var sinkI128, sink2I128 Int128
+
+// benchI128 is BenchIn as Int128
+var benchI128 = sync.OnceValue(func() (in struct {
+	i128, j128 []Int128
+	i64        []int64
+	u64        []uint64
+	i128s      []string
+	// sum, difference and product fit, the shifted x for the narrow Mul forms
+	fx, fy []Int128
+	fx64   []Int128
+}) {
+	b := BenchIn()
+	in.fx, in.fy = Slice128[Int128](b.FI128), Slice128[Int128](b.FJ128)
+	for _, x := range in.fx {
+		in.fx64 = append(in.fx64, x.Rsh(64))
+	}
+	in.i128, in.j128 = Slice128[Int128](b.I128), Slice128[Int128](b.J128)
+	in.i64 = b.I64
+	in.u64 = b.U64
+	in.i128s = b.I128s
+	return
+})

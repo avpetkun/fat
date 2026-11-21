@@ -467,6 +467,140 @@ func (x Int256) CmpBig(y *big.Int) int {
 	return int(int64(d4)>>63) | int(min(d0|d1|d2|d3|d4, 1))
 }
 
+// --- bits -----------------------------------------------
+
+// BitLen returns the length of |x| in bits, 0 for zero
+func (x Int256) BitLen() int {
+	// magnitude bits are right even for MinInt256
+	return x.UnsignedAbs().BitLen()
+}
+
+// Lsh returns x << n, it panics for n < 0
+func (x Int256) Lsh(n int) Int256 {
+	if n < 0 {
+		panic("fat.Int256.Lsh: negative shift")
+	}
+	// the plain lsh is too big to inline
+	return x.lsh(uint64(n))
+}
+
+// lsh is a copy of Uint256.lsh, a left shift is the same for both signs
+func (x Int256) lsh(n uint64) Int256 {
+	// bits within limbs, then whole limbs by conditional moves, no branch on n
+	s, t := n&63, ^n&63
+	// >>1>>t is >>(64-s) that gives 0 at s = 0
+	r3 := x.L3<<s | x.L2>>1>>t
+	r2 := x.L2<<s | x.L1>>1>>t
+	r1 := x.L1<<s | x.L0>>1>>t
+	r0 := x.L0 << s
+	if n&64 != 0 {
+		r3, r2, r1, r0 = r2, r1, r0, 0
+	}
+	// n > 127 for n&128 saves an AND, a wider n zeros all the limbs below
+	if n > 127 {
+		r3, r2, r1, r0 = r1, r0, 0, 0
+	}
+	if n > 255 {
+		r3, r2 = 0, 0
+	}
+	return Int256{r0, r1, r2, r3}
+}
+
+// Rsh returns x >> n rounded toward negative infinity, it panics for n < 0
+func (x Int256) Rsh(n int) Int256 {
+	if n < 0 {
+		panic("fat.Int256.Rsh: negative shift")
+	}
+	// the plain rsh is too big to inline
+	return x.rsh(uint64(n))
+}
+
+// rsh is Rsh for any n: Uint256.rsh with the sign as fill
+func (x Int256) rsh(n uint64) Int256 {
+	// past 255 bits only the sign is left
+	m := uint64(int64(x.L3) >> 63)
+	s, t := n&63, ^n&63
+	r0 := x.L0>>s | x.L1<<1<<t
+	r1 := x.L1>>s | x.L2<<1<<t
+	r2 := x.L2>>s | x.L3<<1<<t
+	r3 := uint64(int64(x.L3) >> s)
+	if n&64 != 0 {
+		r0, r1, r2, r3 = r1, r2, r3, m
+	}
+	// n > 127 for n&128 saves an AND, a wider n fills all the limbs below
+	if n > 127 {
+		r0, r1, r2, r3 = r2, r3, m, m
+	}
+	if n > 255 {
+		r0, r1 = m, m
+	}
+	return Int256{r0, r1, r2, r3}
+}
+
+// Xor returns x ^ y
+func (x Int256) Xor(y Int256) Int256 {
+	return Int256(Uint256(x).Xor(Uint256(y)))
+}
+
+// And returns x & y
+func (x Int256) And(y Int256) Int256 {
+	return Int256(Uint256(x).And(Uint256(y)))
+}
+
+// AndNot returns x &^ y
+func (x Int256) AndNot(y Int256) Int256 {
+	return Int256(Uint256(x).AndNot(Uint256(y)))
+}
+
+// Or returns x | y
+func (x Int256) Or(y Int256) Int256 {
+	return Int256(Uint256(x).Or(Uint256(y)))
+}
+
+// Not returns ^x
+func (x Int256) Not() Int256 {
+	return Int256(Uint256(x).Not())
+}
+
+// Bit returns bit i of x in two's complement, the sign bit past 255.
+// It panics for i < 0
+func (x Int256) Bit(i int) uint {
+	if i < 0 {
+		panic("fat.Int256.Bit: negative index")
+	}
+	// past bit 255 every bit is the sign
+	u := min(uint64(i), 255)
+	// conditional moves keep x in registers
+	lo, hi := x.L0, x.L2
+	if u&64 != 0 {
+		lo, hi = x.L1, x.L3
+	}
+	// u > 127 for u&128 saves an AND
+	if u > 127 {
+		lo = hi
+	}
+	return uint(lo >> (u & 63) & 1)
+}
+
+// WithBit returns x with bit i set to bit, a bit past 255 is dropped.
+// It panics for i < 0 and for bit > 1
+func (x Int256) WithBit(i int, bit uint) Int256 {
+	if i < 0 {
+		panic("fat.Int256.WithBit: negative index")
+	}
+	if bit > 1 {
+		panic("fat.Int256.WithBit: bit not 0 or 1")
+	}
+	u := uint64(i)
+	// a shift past 63 is 0: only the limb of bit i has a mask, none past 255
+	b := -uint64(bit)
+	x.L0 ^= (x.L0 ^ b) & (1 << u)
+	x.L1 ^= (x.L1 ^ b) & (1 << (u - 64))
+	x.L2 ^= (x.L2 ^ b) & (1 << (u - 128))
+	x.L3 ^= (x.L3 ^ b) & (1 << (u - 192))
+	return x
+}
+
 // --- add ------------------------------------------------
 
 // signed overflow: the operands share a sign that the result lacks.

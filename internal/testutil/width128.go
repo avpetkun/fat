@@ -17,6 +17,9 @@ var (
 	BigMaxInt128 = new(big.Int).Sub(Two127, Big1)
 )
 
+// Shifts128 are shift counts around each limb and past the width
+var Shifts128 = []int{0, 1, 2, 31, 62, 63, 64, 65, 66, 100, 126, 127, 128, 129, 191, 192, 255, 256, 320}
+
 // RefU128 returns x as an unsigned big.Int
 func RefU128[T Shape128](x T) *big.Int {
 	v := struct{ L0, L1 uint64 }(x)

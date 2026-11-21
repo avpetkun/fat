@@ -316,6 +316,175 @@ func (x Uint128) CmpBig(y *big.Int) int {
 	return x.Cmp(y128)
 }
 
+// --- bits -----------------------------------------------
+
+// BitLen returns the length of x in bits, 0 for zero
+func (x Uint128) BitLen() int {
+	// a conditional move instead of a branch on the top limb
+	n := bits.Len64(x.L0)
+	if x.L1 != 0 {
+		n = 64 + bits.Len64(x.L1)
+	}
+	return n
+}
+
+// LeadingZeros returns the number of leading zero bits in x, 128 for x == 0
+func (x Uint128) LeadingZeros() int {
+	// both counts first make a conditional move,
+	// and 64 - Len64 inlines cheaper than LeadingZeros64
+	n := 64 - bits.Len64(x.L1)
+	lo := 128 - bits.Len64(x.L0)
+	if x.L1 == 0 {
+		n = lo
+	}
+	return n
+}
+
+// TrailingZeros returns the number of trailing zero bits in x, 128 for x == 0
+func (x Uint128) TrailingZeros() int {
+	// a conditional move, less latency than a mask in our benchmarks
+	n := 64 + bits.TrailingZeros64(x.L1)
+	if x.L0 != 0 {
+		n = bits.TrailingZeros64(x.L0)
+	}
+	return n
+}
+
+// OnesCount returns the number of one bits in x
+func (x Uint128) OnesCount() int {
+	return bits.OnesCount64(x.L0) + bits.OnesCount64(x.L1)
+}
+
+// Lsh returns x << n, it panics for n < 0
+func (x Uint128) Lsh(n int) Uint128 {
+	if n < 0 {
+		panic("fat.Uint128.Lsh: negative shift")
+	}
+	// all ones while n < 128, the sign of n-128 as n is not negative
+	keep := uint64((n - 128) >> (bits.UintSize - 1))
+	// bits within limbs, then the limb by a conditional move, no branches on n
+	// >>1>>(^n&63) is >>(64-n%64), 0 at n%64 = 0
+	r1 := x.L1<<(n&63) | x.L0>>1>>(^n&63)
+	r0 := x.L0 << (n & 63) & keep
+	if n&64 != 0 {
+		r1, r0 = r0, 0
+	}
+	return Uint128{r0, r1 & keep}
+}
+
+// Rsh returns x >> n, it panics for n < 0
+func (x Uint128) Rsh(n int) Uint128 {
+	if n < 0 {
+		panic("fat.Uint128.Rsh: negative shift")
+	}
+	// all ones while n < 128, the sign of n-128 as n is not negative
+	keep := uint64((n - 128) >> (bits.UintSize - 1))
+	// bits within limbs, then the limb by a conditional move, no branches on n
+	// <<1<<(^n&63) is <<(64-n%64), 0 at n%64 = 0
+	r0 := x.L0>>(n&63) | x.L1<<1<<(^n&63)
+	r1 := x.L1 >> (n & 63) & keep
+	if n&64 != 0 {
+		r0, r1 = r1, 0
+	}
+	return Uint128{r0 & keep, r1}
+}
+
+// RotateLeft returns x rotated left by k mod 128 bits, right for k < 0
+func (x Uint128) RotateLeft(k int) Uint128 {
+	// limbs by a conditional move, then bits within limbs;
+	// k&64 and k&63 give k mod 128 for any sign
+	s, t := uint(k)&63, uint(^k)&63
+	lo, hi := x.L0, x.L1
+	if k&64 != 0 {
+		lo, hi = hi, lo
+	}
+	// >>1>>t is >>(64-s) that gives 0 at s = 0
+	return Uint128{lo<<s | hi>>1>>t, hi<<s | lo>>1>>t}
+}
+
+// RotateRight returns x rotated right by k mod 128 bits
+func (x Uint128) RotateRight(k int) Uint128 {
+	return x.RotateLeft(-k)
+}
+
+// Reverse returns x with its bits in reverse order
+func (x Uint128) Reverse() Uint128 {
+	return Uint128{bits.Reverse64(x.L1), bits.Reverse64(x.L0)}
+}
+
+// ReverseBytes returns x with its bytes in reverse order
+func (x Uint128) ReverseBytes() Uint128 {
+	return Uint128{bits.ReverseBytes64(x.L1), bits.ReverseBytes64(x.L0)}
+}
+
+// Xor returns x ^ y
+func (x Uint128) Xor(y Uint128) Uint128 {
+	x.L0 ^= y.L0
+	x.L1 ^= y.L1
+	return x
+}
+
+// And returns x & y
+func (x Uint128) And(y Uint128) Uint128 {
+	x.L0 &= y.L0
+	x.L1 &= y.L1
+	return x
+}
+
+// AndNot returns x &^ y
+func (x Uint128) AndNot(y Uint128) Uint128 {
+	x.L0 &^= y.L0
+	x.L1 &^= y.L1
+	return x
+}
+
+// Or returns x | y
+func (x Uint128) Or(y Uint128) Uint128 {
+	x.L0 |= y.L0
+	x.L1 |= y.L1
+	return x
+}
+
+// Not returns ^x
+func (x Uint128) Not() Uint128 {
+	x.L0 = ^x.L0
+	x.L1 = ^x.L1
+	return x
+}
+
+// Bit returns bit i of x, 0 past bit 127, it panics for i < 0
+func (x Uint128) Bit(i int) uint {
+	if i < 0 {
+		panic("fat.Uint128.Bit: negative index")
+	}
+	u := uint64(i)
+	// the limb by a conditional move, x stays in registers
+	w := x.L0
+	if u&64 != 0 {
+		w = x.L1
+	}
+	// all ones up to bit 127, past it 0 without a branch
+	in := (u>>7 - 1) >> 63
+	return uint(w >> (u & 63) & 1 & in)
+}
+
+// WithBit returns x with bit i set to bit, a bit past 127 is dropped.
+// It panics for i < 0 and for bit > 1
+func (x Uint128) WithBit(i int, bit uint) Uint128 {
+	if i < 0 {
+		panic("fat.Uint128.WithBit: negative index")
+	}
+	if bit > 1 {
+		panic("fat.Uint128.WithBit: bit not 0 or 1")
+	}
+	u := uint64(i)
+	// a shift past 63 gives 0: only the limb holding the bit gets a mask
+	b := -uint64(bit)
+	x.L0 ^= (x.L0 ^ b) & (1 << u)
+	x.L1 ^= (x.L1 ^ b) & (1 << (u - 64))
+	return x
+}
+
 // --- add ------------------------------------------------
 
 // Add returns x + y, it panics on overflow
