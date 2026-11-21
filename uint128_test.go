@@ -16,6 +16,18 @@ func TestUint128Convert(t *testing.T) {
 	Values128(func(x Uint128) {
 		xb := RefU128(x)
 		t := On(t, xb)
+
+		CheckConvert(t, "Uint128.Uint64", BigFits(xb, 64, false), false, x.L0, x.Uint64)
+		CheckConvertUO(t, "Uint128.Uint64", BigFits(xb, 64, false), x.L0, x.Uint64u, x.Uint64o)
+		CheckConvert(t, "Uint128.Int64", BigFits(xb, 64, true), false, int64(x.L0), x.Int64)
+		CheckConvertUO(t, "Uint128.Int64", BigFits(xb, 64, true), int64(x.L0), x.Int64u, x.Int64o)
+		CheckConvert(t, "Uint128.Int128", BigFits(xb, 128, true), false, Int128(x), x.Int128)
+		CheckConvertUO(t, "Uint128.Int128", BigFits(xb, 128, true), Int128(x), x.Int128u, x.Int128o)
+		require.Equal(t, Uint256{x.L0, x.L1, 0, 0}, x.Uint256())
+		require.Equal(t, Int256{x.L0, x.L1, 0, 0}, x.Int256())
+		require.Equal(t, BigFits(xb, 64, false), x.IsUint64())
+		require.Equal(t, BigFits(xb, 64, true), x.IsInt64())
+		require.Equal(t, BigFits(xb, 128, true), x.IsInt128())
 		require.Equal(t, xb.Sign() == 0, x.IsZero())
 
 		// the constructor sets every limb

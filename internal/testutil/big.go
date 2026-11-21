@@ -16,3 +16,11 @@ func LimbsBig(limbs ...uint64) *big.Int {
 	}
 	return b
 }
+
+// BigFits reports whether b is in the range of an n-bit integer
+func BigFits(b *big.Int, n int, signed bool) bool {
+	if signed {
+		return b.BitLen() < n || b.Sign() < 0 && new(big.Int).Add(b, Big1).BitLen() < n
+	}
+	return b.Sign() >= 0 && b.BitLen() <= n
+}
