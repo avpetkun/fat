@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"math/bits"
 )
@@ -72,6 +73,13 @@ func uint128FromBig(v *big.Int) (Uint128, uint) {
 // IsZero reports whether x == 0
 func (x Uint128) IsZero() bool {
 	return x.L0|x.L1 == 0
+}
+
+// Sign returns 0 for x == 0 and 1 otherwise
+func (x Uint128) Sign() int {
+	// the top bit of n|-n is set when n != 0
+	n := x.L0 | x.L1
+	return int((n | -n) >> 63)
 }
 
 // IsUint64 reports whether x fits in a uint64
@@ -211,4 +219,235 @@ func uint128FromWords(words []big.Word) (x Uint128, left int) {
 		l0 = l0<<(bits.UintSize/2)<<(bits.UintSize/2) | uint64(words[i])
 	}
 	return Uint128{l0, l1}, len(words) - n
+}
+
+// --- comparison -----------------------------------------
+
+// Cmp returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Uint128) Cmp(y Uint128) int {
+	// two independent borrow chains, x < y and y < x
+	_, lt := bits.Sub64(x.L0, y.L0, 0)
+	_, lt = bits.Sub64(x.L1, y.L1, lt)
+	_, gt := bits.Sub64(y.L0, x.L0, 0)
+	_, gt = bits.Sub64(y.L1, x.L1, gt)
+	return int(gt) - int(lt)
+}
+
+// LessThan reports whether x < y
+func (x Uint128) LessThan(y Uint128) bool {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1, y.L1, carry)
+	return carry != 0
+}
+
+// LessOrEqual reports whether x <= y
+func (x Uint128) LessOrEqual(y Uint128) bool {
+	_, carry := bits.Sub64(y.L0, x.L0, 0)
+	_, carry = bits.Sub64(y.L1, x.L1, carry)
+	return carry == 0
+}
+
+// GreaterThan reports whether x > y
+func (x Uint128) GreaterThan(y Uint128) bool {
+	_, carry := bits.Sub64(y.L0, x.L0, 0)
+	_, carry = bits.Sub64(y.L1, x.L1, carry)
+	return carry != 0
+}
+
+// GreaterOrEqual reports whether x >= y
+func (x Uint128) GreaterOrEqual(y Uint128) bool {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1, y.L1, carry)
+	return carry == 0
+}
+
+// Max returns the larger of x and y, as the builtin max
+func (x Uint128) Max(y Uint128) Uint128 {
+	// the borrow chain of LessThan written out picks by CSEL
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1, y.L1, carry)
+	if carry != 0 {
+		x = y
+	}
+	return x
+}
+
+// Min returns the smaller of x and y, as the builtin min
+func (x Uint128) Min(y Uint128) Uint128 {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1, y.L1, carry)
+	if carry == 0 {
+		x = y
+	}
+	return x
+}
+
+// Cmp64 returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Uint128) Cmp64(y uint64) int {
+	// two independent borrow chains, x < y and y < x
+	_, lt := bits.Sub64(x.L0, y, 0)
+	_, lt = bits.Sub64(x.L1, 0, lt)
+	_, gt := bits.Sub64(y, x.L0, 0)
+	_, gt = bits.Sub64(0, x.L1, gt)
+	return int(gt) - int(lt)
+}
+
+// CmpBig returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Uint128) CmpBig(y *big.Int) int {
+	words := y.Bits()
+	n := len(words)
+	if bits.UintSize == 64 && uint(n-1) < 2 {
+		// as in uint128FromBig, words[0] stands in for a missing words[1]
+		i := n - 1
+		l0 := uint64(words[0])
+		c := x.Cmp(Uint128{l0, uint64(words[i]) & -uint64(i)})
+		// every x is above a negative y
+		if bigIsNeg(y, l0) {
+			c = 1
+		}
+		return c
+	}
+	// zero, past 128 bits, or 32-bit words
+	y128, e := uint128FromBig(y)
+	if e != 0 {
+		// x is above a negative y and below one past 128 bits
+		return -y.Sign()
+	}
+	return x.Cmp(y128)
+}
+
+// --- add ------------------------------------------------
+
+// Add returns x + y, it panics on overflow
+func (x Uint128) Add(y Uint128) Uint128 {
+	// written out: a call of Addo leaves the NOP of its inline mark in a loop
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, carry = bits.Add64(x.L1, y.L1, carry)
+	if carry != 0 {
+		panic("fat.Uint128.Add: overflow")
+	}
+	return x
+}
+
+// Addo returns Addu and whether x + y overflowed
+func (x Uint128) Addo(y Uint128) (r Uint128, overflow bool) {
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, carry = bits.Add64(x.L1, y.L1, carry)
+	return x, carry != 0
+}
+
+// Addu returns x + y wrapped around as on a Go integer
+func (x Uint128) Addu(y Uint128) Uint128 {
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Add64(x.L1, y.L1, carry)
+	return x
+}
+
+// Add64 returns x + y, it panics on overflow
+func (x Uint128) Add64(y uint64) Uint128 {
+	// written out: a call of Add64o leaves the NOP of its inline mark in a loop
+	// only a full top limb carries, known before the low add
+	var full uint64
+	if x.L1 == math.MaxUint64 {
+		full = 1
+	}
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y, 0)
+	x.L1 += carry
+	if carry&full != 0 {
+		panic("fat.Uint128.Add64: overflow")
+	}
+	return x
+}
+
+// Add64o returns Add64u and whether x + y overflowed
+func (x Uint128) Add64o(y uint64) (r Uint128, overflow bool) {
+	// only a full top limb carries, known before the low add
+	var full uint64
+	if x.L1 == math.MaxUint64 {
+		full = 1
+	}
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y, 0)
+	x.L1 += carry
+	return x, carry&full != 0
+}
+
+// Add64u returns x + y wrapped around as on a Go integer
+func (x Uint128) Add64u(y uint64) Uint128 {
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y, 0)
+	x.L1, _ = bits.Add64(x.L1, 0, carry)
+	return x
+}
+
+// --- sub ------------------------------------------------
+
+// Sub returns x - y, it panics when y > x
+func (x Uint128) Sub(y Uint128) Uint128 {
+	// written out: a call of Subo leaves the NOP of its inline mark in a loop
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, carry = bits.Sub64(x.L1, y.L1, carry)
+	if carry != 0 {
+		panic("fat.Uint128.Sub: negative value")
+	}
+	return x
+}
+
+// Subo returns Subu and whether y > x
+func (x Uint128) Subo(y Uint128) (r Uint128, overflow bool) {
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, carry = bits.Sub64(x.L1, y.L1, carry)
+	return x, carry != 0
+}
+
+// Subu returns x - y wrapped around as on a Go integer
+func (x Uint128) Subu(y Uint128) Uint128 {
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Sub64(x.L1, y.L1, carry)
+	return x
+}
+
+// Sub64 returns x - y, it panics when y > x
+func (x Uint128) Sub64(y uint64) Uint128 {
+	// written out: a call of Sub64o leaves the NOP of its inline mark in a loop
+	var carry uint64
+	if x.L0 < y {
+		carry = 1
+	}
+	// only a zero top limb borrows
+	over := x.L1 < carry
+	x.L0 -= y
+	x.L1 -= carry
+	if over {
+		panic("fat.Uint128.Sub64: negative value")
+	}
+	return x
+}
+
+// Sub64o returns Sub64u and whether y > x
+func (x Uint128) Sub64o(y uint64) (r Uint128, overflow bool) {
+	var carry uint64
+	if x.L0 < y {
+		carry = 1
+	}
+	// only a zero top limb borrows
+	over := x.L1 < carry
+	x.L0 -= y
+	x.L1 -= carry
+	return x, over
+}
+
+// Sub64u returns x - y wrapped around as on a Go integer
+func (x Uint128) Sub64u(y uint64) Uint128 {
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y, 0)
+	x.L1, _ = bits.Sub64(x.L1, 0, carry)
+	return x
 }

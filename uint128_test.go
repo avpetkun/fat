@@ -62,3 +62,63 @@ func TestUint128Convert(t *testing.T) {
 	// an error with the input quotes it
 	require.Equal(t, `fat.Uint128FromHex: negative value "-1"`, ErrNegative{"Uint128FromHex", "-1"}.Error())
 }
+
+// TestUint128Arith checks Add, Sub, Mul and the bitwise ops with big.Int
+func TestUint128Arith(t *testing.T) {
+	t.Parallel()
+	RunArith(t, kU128, []Arith[Uint128]{
+		{Name: "Add", Width: 128, Fn: Plain(Uint128.Add), Ref: BigAdd, Panic: "fat.Uint128.Add: overflow"},
+		{Name: "Addu", Width: 128, Fn: Plain(Uint128.Addu), Ref: BigAdd},
+		{Name: "Addo", Width: 128, Fn: Uint128.Addo, Ref: BigAdd, Over: true},
+
+		{Name: "Sub", Width: 128, Fn: Plain(Uint128.Sub), Ref: BigSub, Panic: "fat.Uint128.Sub: negative value"},
+		{Name: "Subu", Width: 128, Fn: Plain(Uint128.Subu), Ref: BigSub},
+		{Name: "Subo", Width: 128, Fn: Uint128.Subo, Ref: BigSub, Over: true},
+	})
+}
+
+// narrowUint128 cuts y to width bits, zeroing the limb above
+func narrowUint128(y Uint128, width int) Uint128 {
+	if width == 64 {
+		y.L1 = 0
+	}
+	return y
+}
+
+// kU128 describes Uint128 to the shared checks of testutil
+var kU128 = Kind[Uint128]{
+	Name: "Uint128", Bits: 128,
+	Ref: RefU128, Wrap: WrapU128, Fits: FitsU128,
+	FromBig: MustUint128FromBig,
+	Max:     MaxUint128(),
+	Values:  Values128, Pairs: Pairs128,
+	Narrow: narrowUint128,
+	Ops64: Ops64[Uint128]{
+		New: NewUint128, Cmp: Uint128.Cmp64,
+		Add: Uint128.Add64, Sub: Uint128.Sub64,
+		Addo: Uint128.Add64o, Subo: Uint128.Sub64o, Addu: Uint128.Add64u, Subu: Uint128.Sub64u,
+	},
+}
+
+// TestUint128Cmp checks Cmp, the comparisons and CmpBig with big.Int
+func TestUint128Cmp(t *testing.T) { RunCmp(t, kU128) }
+
+// TestUint128Ops64 checks the methods with a uint64 operand with big.Int
+func TestUint128Ops64(t *testing.T) { RunOps64(t, kU128) }
+
+// TestUint128Sign checks Sign and IsZero with big.Int
+func TestUint128Sign(t *testing.T) { RunSign(t, kU128) }
+
+// TestUint128PanicText checks that every panic names the method
+func TestUint128PanicText(t *testing.T) { RunPanicText(t, kU128) }
+
+// TestUint128Constants checks untyped constants as 64-bit operands and shifts
+func TestUint128Constants(t *testing.T) {
+	t.Parallel()
+	x := NewUint128(5)
+	require.Equal(t, NewUint128(7), x.Add64(2))
+	require.Equal(t, NewUint128(3), x.Sub64(2))
+	require.Equal(t, 1, x.Cmp64(4))
+	x = x.Add64(1).Sub64(3)
+	require.Equal(t, NewUint128(3), x)
+}

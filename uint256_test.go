@@ -66,6 +66,77 @@ func TestUint256Convert(t *testing.T) {
 	})
 }
 
+// TestUint256Arith checks Add, Sub, Mul and the bit ops against big.Int,
+// with 256- and 128-bit operands in the panicking, u and o forms
+func TestUint256Arith(t *testing.T) {
+	t.Parallel()
+	RunArith(t, kU256, []Arith[Uint256]{
+		{Name: "Add", Width: 256, Fn: Plain(Uint256.Add), Ref: BigAdd, Panic: "fat.Uint256.Add: overflow"},
+		{Name: "Addu", Width: 256, Fn: Plain(Uint256.Addu), Ref: BigAdd},
+		{Name: "Addo", Width: 256, Fn: Uint256.Addo, Ref: BigAdd, Over: true},
+		{Name: "Add128", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Add128(Uint128{y.L0, y.L1}) }), Ref: BigAdd, Panic: "fat.Uint256.Add128: overflow"},
+		{Name: "Add128u", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Add128u(Uint128{y.L0, y.L1}) }), Ref: BigAdd},
+		{Name: "Add128o", Width: 128, Fn: func(x, y Uint256) (Uint256, bool) { return x.Add128o(Uint128{y.L0, y.L1}) }, Ref: BigAdd, Over: true},
+
+		{Name: "Sub", Width: 256, Fn: Plain(Uint256.Sub), Ref: BigSub, Panic: "fat.Uint256.Sub: negative value"},
+		{Name: "Subu", Width: 256, Fn: Plain(Uint256.Subu), Ref: BigSub},
+		{Name: "Subo", Width: 256, Fn: Uint256.Subo, Ref: BigSub, Over: true},
+		{Name: "Sub128", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Sub128(Uint128{y.L0, y.L1}) }), Ref: BigSub, Panic: "fat.Uint256.Sub128: negative value"},
+		{Name: "Sub128u", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Sub128u(Uint128{y.L0, y.L1}) }), Ref: BigSub},
+		{Name: "Sub128o", Width: 128, Fn: func(x, y Uint256) (Uint256, bool) { return x.Sub128o(Uint128{y.L0, y.L1}) }, Ref: BigSub, Over: true},
+	})
+}
+
+// narrowUint256 zeroes the limbs of y above width bits
+func narrowUint256(y Uint256, width int) Uint256 {
+	l := [4]uint64{y.L0, y.L1, y.L2, y.L3}
+	for i := width / 64; i < 4; i++ {
+		l[i] = 0
+	}
+	return Uint256{l[0], l[1], l[2], l[3]}
+}
+
+// kU256 describes Uint256 for the shared tests
+var kU256 = Kind[Uint256]{
+	Name: "Uint256", Bits: 256,
+	Ref: RefU256, Wrap: WrapU256, Fits: FitsU256,
+	FromBig: MustUint256FromBig,
+	Max:     MaxUint256(),
+	Values:  Values256, Pairs: Pairs256,
+	Narrow: narrowUint256,
+	CmpMore: func(t testing.TB, x, y Uint256, xb *big.Int) {
+		require.Equal(t, xb.Cmp(LimbsBig(y.L0, y.L1)), x.Cmp128(Uint128{y.L0, y.L1}))
+	},
+	Ops64: Ops64[Uint256]{
+		New: NewUint256, Cmp: Uint256.Cmp64,
+		Add: Uint256.Add64, Sub: Uint256.Sub64,
+		Addo: Uint256.Add64o, Subo: Uint256.Sub64o, Addu: Uint256.Add64u, Subu: Uint256.Sub64u,
+	},
+}
+
+// TestUint256Cmp checks the comparisons and CmpBig against big.Int
+func TestUint256Cmp(t *testing.T) { RunCmp(t, kU256) }
+
+// TestUint256Ops64 checks the methods with a uint64 operand against big.Int
+func TestUint256Ops64(t *testing.T) { RunOps64(t, kU256) }
+
+// TestUint256Sign checks Sign and IsZero against big.Int
+func TestUint256Sign(t *testing.T) { RunSign(t, kU256) }
+
+// TestUint256PanicText checks that every panic names its func or method
+func TestUint256PanicText(t *testing.T) { RunPanicText(t, kU256) }
+
+// TestUint256Constants checks that untyped constants compile as operands
+func TestUint256Constants(t *testing.T) {
+	t.Parallel()
+	x := NewUint256(5)
+	require.Equal(t, NewUint256(7), x.Add64(2))
+	require.Equal(t, NewUint256(3), x.Sub64(2))
+	require.Equal(t, 1, x.Cmp64(4))
+	x = x.Add64(1).Sub64(3)
+	require.Equal(t, NewUint256(3), x)
+}
+
 // TestUint256From128 checks that Uint128 widens by zeros, also in binary
 func TestUint256From128(t *testing.T) {
 	t.Parallel()

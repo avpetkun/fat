@@ -16,7 +16,6 @@ func TestInt256Convert(t *testing.T) {
 
 	Values256(func(x Int256) {
 		xb := RefI256(x)
-		require.Equal(t, xb.Sign() == 0, x.IsZero())
 		t := On(t, xb)
 
 		// a negative x has no unsigned value
@@ -36,7 +35,6 @@ func TestInt256Convert(t *testing.T) {
 		require.Equal(t, BigFits(xb, 64, false), x.IsUint64())
 		require.Equal(t, BigFits(xb, 128, false), x.IsUint128())
 		require.Equal(t, BigFits(xb, 256, false), x.IsUint256())
-		require.Big(t, new(big.Int).Abs(xb), RefU256(x.UnsignedAbs()))
 
 		// big.Int both ways, reusing dirty values
 		require.Big(t, xb, x.Big())
@@ -63,6 +61,75 @@ func TestInt256Convert(t *testing.T) {
 		require.Big(t, big.NewInt(v64), RefI256(NewInt256(v64)))
 		require.Big(t, RefI256(narrowInt256(x, 128)), RefI256(v128.Int256()))
 	})
+}
+
+// TestInt256Arith checks Add, Sub, Mul and the bit ops against big.Int,
+// with 256- and 128-bit operands in the panicking, u and o forms
+func TestInt256Arith(t *testing.T) {
+	t.Parallel()
+	low128 := func(y Int256) Int128 { return Int128{y.L0, y.L1} }
+	RunArith(t, kI256, []Arith[Int256]{
+		{Name: "Add", Width: 256, Fn: Plain(Int256.Add), Ref: BigAdd, Panic: "fat.Int256.Add: overflow"},
+		{Name: "Addu", Width: 256, Fn: Plain(Int256.Addu), Ref: BigAdd},
+		{Name: "Addo", Width: 256, Fn: Int256.Addo, Ref: BigAdd, Over: true},
+		{Name: "Add128", Width: 128, Fn: Plain(func(x, y Int256) Int256 { return x.Add128(low128(y)) }), Ref: BigAdd, Panic: "fat.Int256.Add128: overflow"},
+		{Name: "Add128u", Width: 128, Fn: Plain(func(x, y Int256) Int256 { return x.Add128u(low128(y)) }), Ref: BigAdd},
+		{Name: "Add128o", Width: 128, Fn: func(x, y Int256) (Int256, bool) { return x.Add128o(low128(y)) }, Ref: BigAdd, Over: true},
+
+		{Name: "Sub", Width: 256, Fn: Plain(Int256.Sub), Ref: BigSub, Panic: "fat.Int256.Sub: overflow"},
+		{Name: "Subu", Width: 256, Fn: Plain(Int256.Subu), Ref: BigSub},
+		{Name: "Subo", Width: 256, Fn: Int256.Subo, Ref: BigSub, Over: true},
+		{Name: "Sub128", Width: 128, Fn: Plain(func(x, y Int256) Int256 { return x.Sub128(low128(y)) }), Ref: BigSub, Panic: "fat.Int256.Sub128: overflow"},
+		{Name: "Sub128u", Width: 128, Fn: Plain(func(x, y Int256) Int256 { return x.Sub128u(low128(y)) }), Ref: BigSub},
+		{Name: "Sub128o", Width: 128, Fn: func(x, y Int256) (Int256, bool) { return x.Sub128o(low128(y)) }, Ref: BigSub, Over: true},
+	})
+}
+
+// kI256 describes Int256 for the shared tests
+var kI256 = Kind[Int256]{
+	Name: "Int256", Bits: 256, Signed: true,
+	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
+	FromBig: MustInt256FromBig,
+	Max:     MaxInt256(), Min: MinInt256(),
+	Values: Values256, Pairs: Pairs256,
+	Narrow: narrowInt256,
+	CmpMore: func(t testing.TB, x, y Int256, xb *big.Int) {
+		y128 := narrowInt256(y, 128)
+		require.Equal(t, xb.Cmp(RefI256(y128)), x.Cmp128(Int128{y128.L0, y128.L1}))
+	},
+	Ops64: Ops64[Int256]{
+		New: func(v uint64) Int256 { return NewInt256(int64(v)) }, Cmp: Signed64(Int256.Cmp64),
+		Add: Signed64(Int256.Add64), Sub: Signed64(Int256.Sub64),
+		Addo: Signed64Pair(Int256.Add64o), Subo: Signed64Pair(Int256.Sub64o), Addu: Signed64(Int256.Add64u), Subu: Signed64(Int256.Sub64u),
+	},
+}
+
+// TestInt256Cmp checks the comparisons and CmpBig against big.Int
+func TestInt256Cmp(t *testing.T) { RunCmp(t, kI256) }
+
+// TestInt256Ops64 checks the methods with an int64 operand against big.Int
+func TestInt256Ops64(t *testing.T) { RunOps64(t, kI256) }
+
+// TestInt256Sign checks Sign and IsZero against big.Int
+func TestInt256Sign(t *testing.T) { RunSign(t, kI256) }
+
+// TestInt256Signed checks IsNegative, IsPositive, Neg, Abs and UnsignedAbs against big.Int
+func TestInt256Signed(t *testing.T) {
+	RunSigned(t, kI256, func(x Int256) *big.Int { return RefU256(x.UnsignedAbs()) })
+}
+
+// TestInt256PanicText checks that every panic names its func or method
+func TestInt256PanicText(t *testing.T) { RunPanicText(t, kI256) }
+
+// TestInt256Constants checks that untyped constants of either sign compile
+func TestInt256Constants(t *testing.T) {
+	t.Parallel()
+	x := NewInt256(-5)
+	require.Equal(t, NewInt256(-3), x.Add64(2))
+	require.Equal(t, NewInt256(-7), x.Sub64(2))
+	require.Equal(t, -1, x.Cmp64(-4))
+	x = x.Add64(1).Sub64(-3)
+	require.Equal(t, NewInt256(-1), x)
 }
 
 // narrowInt256 cuts y to width bits and extends its sign

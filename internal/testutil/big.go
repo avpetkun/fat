@@ -39,3 +39,8 @@ func BigAdd(x, y *big.Int) *big.Int { return new(big.Int).Add(x, y) }
 
 // BigSub returns x - y in a new big.Int
 func BigSub(x, y *big.Int) *big.Int { return new(big.Int).Sub(x, y) }
+
+// Plain adapts an operation that reports no overflow to Arith.Fn
+func Plain[T any](f func(x, y T) T) func(x, y T) (T, bool) {
+	return func(x, y T) (T, bool) { return f(x, y), false }
+}

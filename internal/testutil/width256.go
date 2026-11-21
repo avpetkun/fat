@@ -36,6 +36,24 @@ func RefI256[T Shape256](x T) *big.Int {
 	return b
 }
 
+// WrapU256 reduces b modulo 2^256
+func WrapU256(b *big.Int) *big.Int { return new(big.Int).Mod(b, Two256) }
+
+// WrapI256 reduces b into the int256 range
+func WrapI256(b *big.Int) *big.Int {
+	r := WrapU256(b)
+	if r.Cmp(Two255) >= 0 {
+		r.Sub(r, Two256)
+	}
+	return r
+}
+
+// FitsU256 reports whether b is in the uint256 range
+func FitsU256(b *big.Int) bool { return b.Sign() >= 0 && b.BitLen() <= 256 }
+
+// FitsI256 reports whether b is in the int256 range
+func FitsI256(b *big.Int) bool { return b.Cmp(BigMinInt256) >= 0 && b.Cmp(BigMaxInt256) <= 0 }
+
 // Edge256 are limb patterns at every carry, width and sign boundary
 var Edge256 = [][4]uint64{
 	{},
@@ -88,5 +106,27 @@ func Values256[T Shape256](fn func(x T)) {
 	r := rand.New(rand.NewSource(1))
 	for range RandomCount {
 		fn(Limbs256[T](Rand256(r)))
+	}
+}
+
+// Pairs256 calls fn with every edge pair and many random pairs.
+// Some random pairs are equal, or y is x with one limb plus 1
+func Pairs256[T Shape256](fn func(x, y T)) {
+	for _, x := range Edge256 {
+		for _, y := range Edge256 {
+			fn(Limbs256[T](x), Limbs256[T](y))
+		}
+	}
+	r := rand.New(rand.NewSource(2))
+	for range RandomCount {
+		x, y := Rand256(r), Rand256(r)
+		switch r.Intn(8) {
+		case 0:
+			y = x
+		case 1:
+			y = x
+			y[r.Intn(4)]++
+		}
+		fn(Limbs256[T](x), Limbs256[T](y))
 	}
 }

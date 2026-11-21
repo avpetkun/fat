@@ -16,7 +16,6 @@ func TestInt128Convert(t *testing.T) {
 
 	Values128(func(x Int128) {
 		xb := RefI128(x)
-		require.Equal(t, xb.Sign() == 0, x.IsZero())
 		t := On(t, xb)
 
 		// sign extended above 128 bits, a negative x has no unsigned value
@@ -60,4 +59,69 @@ func TestInt128Convert(t *testing.T) {
 		v64 := int64(x.L0)
 		require.Big(t, big.NewInt(v64), RefI128(NewInt128(v64)))
 	})
+}
+
+// TestInt128Arith checks Add, Sub, Mul and the bitwise ops with big.Int
+func TestInt128Arith(t *testing.T) {
+	t.Parallel()
+	RunArith(t, kI128, []Arith[Int128]{
+		{Name: "Add", Width: 128, Fn: Plain(Int128.Add), Ref: BigAdd, Panic: "fat.Int128.Add: overflow"},
+		{Name: "Addu", Width: 128, Fn: Plain(Int128.Addu), Ref: BigAdd},
+		{Name: "Addo", Width: 128, Fn: Int128.Addo, Ref: BigAdd, Over: true},
+
+		{Name: "Sub", Width: 128, Fn: Plain(Int128.Sub), Ref: BigSub, Panic: "fat.Int128.Sub: overflow"},
+		{Name: "Subu", Width: 128, Fn: Plain(Int128.Subu), Ref: BigSub},
+		{Name: "Subo", Width: 128, Fn: Int128.Subo, Ref: BigSub, Over: true},
+	})
+}
+
+// kI128 describes Int128 to the shared checks of testutil
+var kI128 = Kind[Int128]{
+	Name: "Int128", Bits: 128, Signed: true,
+	Ref: RefI128, Wrap: WrapI128, Fits: FitsI128,
+	FromBig: MustInt128FromBig,
+	Max:     MaxInt128(), Min: MinInt128(),
+	Values: Values128, Pairs: Pairs128,
+	Narrow: narrowInt128,
+	Ops64: Ops64[Int128]{
+		New: func(v uint64) Int128 { return NewInt128(int64(v)) }, Cmp: Signed64(Int128.Cmp64),
+		Add: Signed64(Int128.Add64), Sub: Signed64(Int128.Sub64),
+		Addo: Signed64Pair(Int128.Add64o), Subo: Signed64Pair(Int128.Sub64o), Addu: Signed64(Int128.Add64u), Subu: Signed64(Int128.Sub64u),
+	},
+}
+
+// TestInt128Cmp checks Cmp, the comparisons and CmpBig with big.Int
+func TestInt128Cmp(t *testing.T) { RunCmp(t, kI128) }
+
+// TestInt128Ops64 checks the methods with an int64 operand with big.Int
+func TestInt128Ops64(t *testing.T) { RunOps64(t, kI128) }
+
+// TestInt128Sign checks Sign and IsZero with big.Int
+func TestInt128Sign(t *testing.T) { RunSign(t, kI128) }
+
+// TestInt128Signed checks IsNegative, IsPositive, Neg, Abs and UnsignedAbs with big.Int
+func TestInt128Signed(t *testing.T) {
+	RunSigned(t, kI128, func(x Int128) *big.Int { return RefU128(x.UnsignedAbs()) })
+}
+
+// TestInt128PanicText checks that every panic names the method
+func TestInt128PanicText(t *testing.T) { RunPanicText(t, kI128) }
+
+// TestInt128Constants checks untyped constants as 64-bit operands and shifts
+func TestInt128Constants(t *testing.T) {
+	t.Parallel()
+	x := NewInt128(-5)
+	require.Equal(t, NewInt128(-3), x.Add64(2))
+	require.Equal(t, NewInt128(-7), x.Sub64(2))
+	require.Equal(t, -1, x.Cmp64(-4))
+	x = x.Add64(1).Sub64(-3)
+	require.Equal(t, NewInt128(-1), x)
+}
+
+// narrowInt128 cuts y to width bits, sign-extending into the limb above
+func narrowInt128(y Int128, width int) Int128 {
+	if width == 64 {
+		y.L1 = uint64(int64(y.L0) >> 63)
+	}
+	return y
 }

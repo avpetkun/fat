@@ -70,9 +70,22 @@ func (x Int128) IsZero() bool {
 	return x.L0|x.L1 == 0
 }
 
+// Sign returns -1 for x < 0, 0 for x == 0 and 1 for x > 0
+func (x Int128) Sign() int {
+	// -1 or 0 from the sign, | 1 if nonzero, no branches
+	return int(uint64(int64(x.L1)>>63) | min(x.L0|x.L1, 1))
+}
+
 // IsNegative reports whether x < 0
 func (x Int128) IsNegative() bool {
 	return x.L1>>63 == 1
+}
+
+// IsPositive reports whether x > 0
+func (x Int128) IsPositive() bool {
+	// -x is negative and x is not, && would branch
+	_, b := bits.Sub64(0, x.L0, 0)
+	return int64((-x.L1-b)&^x.L1) < 0
 }
 
 // IsInt64 reports whether x fits in an int64
@@ -211,6 +224,28 @@ func (x Int128) PutBig(b *big.Int) *big.Int {
 	return b
 }
 
+// --- sign -----------------------------------------------
+
+// Neg returns -x, it panics for MinInt128
+func (x Int128) Neg() Int128 {
+	r0, c := bits.Sub64(0, x.L0, 0)
+	r1, _ := bits.Sub64(0, x.L1, c)
+	// only MinInt128 stays negative
+	if int64(x.L1&r1) < 0 {
+		panic("fat.Int128.Neg: overflow")
+	}
+	return Int128{r0, r1}
+}
+
+// Abs returns |x|, it panics for MinInt128
+func (x Int128) Abs() Int128 {
+	r := x.UnsignedAbs()
+	if int64(r.L1) < 0 {
+		panic("fat.Int128.Abs: overflow")
+	}
+	return Int128(r)
+}
+
 // UnsignedAbs returns |x| as a Uint128, which holds 2^127 for MinInt128
 func (x Int128) UnsignedAbs() Uint128 {
 	// -x picked by conditional moves
@@ -220,4 +255,242 @@ func (x Int128) UnsignedAbs() Uint128 {
 		r0, r1 = x.L0, x.L1
 	}
 	return Uint128{r0, r1}
+}
+
+// --- comparison -----------------------------------------
+
+// flipping the sign bits maps signed order onto unsigned order
+
+// Cmp returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Int128) Cmp(y Int128) int {
+	// two borrow chains, x < y and y < x
+	x1, y1 := x.L1^(1<<63), y.L1^(1<<63)
+	_, lt := bits.Sub64(x.L0, y.L0, 0)
+	_, lt = bits.Sub64(x1, y1, lt)
+	_, gt := bits.Sub64(y.L0, x.L0, 0)
+	_, gt = bits.Sub64(y1, x1, gt)
+	return int(gt) - int(lt)
+}
+
+// LessThan reports whether x < y
+func (x Int128) LessThan(y Int128) bool {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1^(1<<63), y.L1^(1<<63), carry)
+	return carry != 0
+}
+
+// LessOrEqual reports whether x <= y
+func (x Int128) LessOrEqual(y Int128) bool {
+	_, carry := bits.Sub64(y.L0, x.L0, 0)
+	_, carry = bits.Sub64(y.L1^(1<<63), x.L1^(1<<63), carry)
+	return carry == 0
+}
+
+// GreaterThan reports whether x > y
+func (x Int128) GreaterThan(y Int128) bool {
+	_, carry := bits.Sub64(y.L0, x.L0, 0)
+	_, carry = bits.Sub64(y.L1^(1<<63), x.L1^(1<<63), carry)
+	return carry != 0
+}
+
+// GreaterOrEqual reports whether x >= y
+func (x Int128) GreaterOrEqual(y Int128) bool {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1^(1<<63), y.L1^(1<<63), carry)
+	return carry == 0
+}
+
+// Max returns the larger of x and y, as the builtin max
+func (x Int128) Max(y Int128) Int128 {
+	// the borrow chain of LessThan written out picks by CSEL
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1^(1<<63), y.L1^(1<<63), carry)
+	if carry != 0 {
+		x = y
+	}
+	return x
+}
+
+// Min returns the smaller of x and y, as the builtin min
+func (x Int128) Min(y Int128) Int128 {
+	_, carry := bits.Sub64(x.L0, y.L0, 0)
+	_, carry = bits.Sub64(x.L1^(1<<63), y.L1^(1<<63), carry)
+	if carry == 0 {
+		x = y
+	}
+	return x
+}
+
+// Cmp64 returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Int128) Cmp64(y int64) int {
+	ext := uint64(y >> 63)
+	// two borrow chains, x < y and y < x
+	_, lt := bits.Sub64(x.L0, uint64(y), 0)
+	_, lt = bits.Sub64(x.L1^(1<<63), ext^(1<<63), lt)
+	_, gt := bits.Sub64(uint64(y), x.L0, 0)
+	_, gt = bits.Sub64(ext^(1<<63), x.L1^(1<<63), gt)
+	return int(gt) - int(lt)
+}
+
+// CmpBig returns -1 for x < y, 0 for x = y and 1 for x > y
+func (x Int128) CmpBig(y *big.Int) int {
+	words := y.Bits()
+	n := len(words)
+	if bits.UintSize == 64 && uint(n-1) < 2 {
+		// as in Uint128.CmpBig, words[0] stands in for a missing words[1]
+		i := n - 1
+		l0 := uint64(words[0])
+		l1 := uint64(words[i]) & -uint64(i)
+		// y as 192-bit two's complement needs no range checks
+		// all ones for a negative y, Sign would branch
+		m := bigNeg(y, l0)
+		y0, b := bits.Sub64(l0^m, m, 0)
+		y1, b := bits.Sub64(l1^m, m, b)
+		y2, _ := bits.Sub64(m, m, b)
+		d0, c := bits.Sub64(x.L0, y0, 0)
+		d1, c := bits.Sub64(x.L1, y1, c)
+		d2, c := bits.Sub64(uint64(int64(x.L1)>>63)^(1<<63), y2^(1<<63), c)
+		return int(-c | min(d0|d1|d2, 1))
+	}
+	// zero, past 128 bits, or 32-bit words
+	y128, ok := int128FromBig(y)
+	if !ok {
+		// out of range, x is below a positive y and above a negative one
+		return -y.Sign()
+	}
+	return x.Cmp(y128)
+}
+
+// --- add ------------------------------------------------
+
+// signed overflow of the o forms: the operands share a sign the result lacks
+
+// Add returns x + y, it panics on overflow
+func (x Int128) Add(y Int128) Int128 {
+	// written out: a call of Addo leaves the NOP of its inline mark in a loop
+	x1 := x.L1
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Add64(x.L1, y.L1, carry)
+	if int64((x1^x.L1)&(y.L1^x.L1)) < 0 {
+		panic("fat.Int128.Add: overflow")
+	}
+	return x
+}
+
+// Addo returns Addu and whether x + y overflowed
+func (x Int128) Addo(y Int128) (r Int128, overflow bool) {
+	x1 := x.L1
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Add64(x.L1, y.L1, carry)
+	return x, int64((x1^x.L1)&(y.L1^x.L1)) < 0
+}
+
+// Addu returns x + y wrapped around as on a Go integer
+func (x Int128) Addu(y Int128) Int128 {
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Add64(x.L1, y.L1, carry)
+	return x
+}
+
+// Add64 returns x + y, it panics on overflow
+func (x Int128) Add64(y int64) Int128 {
+	// written out: a call of Add64o leaves the NOP of its inline mark in a loop
+	x1 := x.L1
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Add64(x.L1, ext, carry)
+	if int64((x1^x.L1)&(ext^x.L1)) < 0 {
+		panic("fat.Int128.Add64: overflow")
+	}
+	return x
+}
+
+// Add64o returns Add64u and whether x + y overflowed
+func (x Int128) Add64o(y int64) (r Int128, overflow bool) {
+	x1 := x.L1
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Add64(x.L1, ext, carry)
+	return x, int64((x1^x.L1)&(ext^x.L1)) < 0
+}
+
+// Add64u returns x + y wrapped around as on a Go integer
+func (x Int128) Add64u(y int64) Int128 {
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Add64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Add64(x.L1, ext, carry)
+	return x
+}
+
+// --- sub ------------------------------------------------
+
+// signed overflow of the o forms: the signs differ, the result lost that of x
+
+// Sub returns x - y, it panics on overflow
+func (x Int128) Sub(y Int128) Int128 {
+	// written out: a call of Subo leaves the NOP of its inline mark in a loop
+	x1 := x.L1
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Sub64(x.L1, y.L1, carry)
+	if int64((x1^y.L1)&(x1^x.L1)) < 0 {
+		panic("fat.Int128.Sub: overflow")
+	}
+	return x
+}
+
+// Subo returns Subu and whether x - y overflowed
+func (x Int128) Subo(y Int128) (r Int128, overflow bool) {
+	x1 := x.L1
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Sub64(x.L1, y.L1, carry)
+	return x, int64((x1^y.L1)&(x1^x.L1)) < 0
+}
+
+// Subu returns x - y wrapped around as on a Go integer
+func (x Int128) Subu(y Int128) Int128 {
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, y.L0, 0)
+	x.L1, _ = bits.Sub64(x.L1, y.L1, carry)
+	return x
+}
+
+// Sub64 returns x - y, it panics on overflow
+func (x Int128) Sub64(y int64) Int128 {
+	// written out: a call of Sub64o leaves the NOP of its inline mark in a loop
+	x1 := x.L1
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Sub64(x.L1, ext, carry)
+	if int64((x1^ext)&(x1^x.L1)) < 0 {
+		panic("fat.Int128.Sub64: overflow")
+	}
+	return x
+}
+
+// Sub64o returns Sub64u and whether x - y overflowed
+func (x Int128) Sub64o(y int64) (r Int128, overflow bool) {
+	x1 := x.L1
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Sub64(x.L1, ext, carry)
+	return x, int64((x1^ext)&(x1^x.L1)) < 0
+}
+
+// Sub64u returns x - y wrapped around as on a Go integer
+func (x Int128) Sub64u(y int64) Int128 {
+	ext := uint64(y >> 63)
+	var carry uint64
+	x.L0, carry = bits.Sub64(x.L0, uint64(y), 0)
+	x.L1, _ = bits.Sub64(x.L1, ext, carry)
+	return x
 }
