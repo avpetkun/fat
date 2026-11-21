@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"sync"
 	"testing"
@@ -106,6 +107,71 @@ func TestUint128BitCounts(t *testing.T) {
 		require.Equal(t, BigTrailingZeros(xb, 128), x.TrailingZeros())
 		require.Equal(t, BigOnesCount(xb), x.OnesCount())
 	})
+}
+
+// TestUint128DivMod64 checks division by a uint64 with big.Int and by zero
+func TestUint128DivMod64(t *testing.T) {
+	t.Parallel()
+	check := func(x Uint128, y uint64) {
+		xb, yb := RefU128(x), new(big.Int).SetUint64(y)
+		t := On(t, xb, yb)
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		q, r := x.Div64(y), x.Mod64(y)
+		require.Big(t, qb, RefU128(q))
+		require.Equal(t, rb.Uint64(), r)
+	}
+	Values128(func(x Uint128) {
+		for _, y := range Divisors64 {
+			check(x, y)
+		}
+	})
+	for _, x := range Edge128 {
+		for _, y := range SeedDivisors64 {
+			check(Limbs128[Uint128](x), y)
+		}
+	}
+	require.Equal(t, "fat.Uint128.Div64: division by zero", PanicValue(func() { MaxUint128().Div64(0) }))
+	require.Equal(t, "fat.Uint128.Mod64: division by zero", PanicValue(func() { MaxUint128().Mod64(0) }))
+}
+
+// divPairs128 calls fn with pairs at the borders of the division paths.
+// Limbs lie near 0, 2^32, 2^33, 2^63 and 2^64, x within 2 of a multiple of y
+func divPairs128(fn func(x, y Uint128)) {
+	limbs := []uint64{0, 1, 2, 1<<32 - 1, 1 << 32, 1<<33 - 1, 1 << 33, 1<<33 + 1, 1<<63 - 1, 1 << 63,
+		math.MaxUint64 - 1, math.MaxUint64}
+	for _, y1 := range limbs {
+		for _, y0 := range limbs {
+			y := Uint128{y0, y1}
+			for _, k := range limbs {
+				fn(Uint128{y0, k}, y)
+				fn(Uint128{^y0, k}, y)
+				m := y.Mulu(Uint128{k, 0})
+				for d := range uint64(5) {
+					fn(m.Add64u(d).Sub64u(2), y)
+				}
+			}
+		}
+	}
+}
+
+// TestUint128DivMod checks Div, Mod and DivMod with big.Int and by zero
+func TestUint128DivMod(t *testing.T) {
+	t.Parallel()
+	check := func(x, y Uint128) {
+		xb, yb := RefU128(x), RefU128(y)
+		t := On(t, xb, yb)
+		if y.IsZero() {
+			return
+		}
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		q, r := x.Div(y), x.Mod(y)
+		require.Big(t, qb, RefU128(q))
+		require.Big(t, rb, RefU128(r))
+	}
+	Pairs128(check)
+	divPairs128(check)
+	require.Equal(t, "fat.Uint128.Div: division by zero", PanicValue(func() { MaxUint128().Div(Uint128{}) }))
+	require.Equal(t, "fat.Uint128.Mod: division by zero", PanicValue(func() { MaxUint128().Mod(Uint128{}) }))
 }
 
 // TestUint128Rotate checks the rotations and reversals with big.Int
@@ -228,6 +294,30 @@ func BenchmarkUint128(b *testing.B) {
 		x, y := in.u128, in.u64
 		for i := range b.N {
 			sinkU128 = x[i&BenchMask].Mul64u(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Div", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Div(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mod", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Mod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Div64", func(b *testing.B) {
+		x, y := in.u128, in.u64
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Div64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mod64", func(b *testing.B) {
+		x, y := in.u128, in.u64
+		for i := range b.N {
+			SinkUint64 = x[i&BenchMask].Mod64(y[i&BenchMask])
 		}
 	})
 	b.Run("op=Lsh", func(b *testing.B) {

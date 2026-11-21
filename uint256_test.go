@@ -3,6 +3,7 @@ package fat
 import (
 	"math"
 	"math/big"
+	"math/bits"
 	"math/rand"
 	"sync"
 	"testing"
@@ -122,6 +123,171 @@ func TestUint256BitCounts(t *testing.T) {
 		require.Equal(t, BigTrailingZeros(xb, 256), x.TrailingZeros())
 		require.Equal(t, BigOnesCount(xb), x.OnesCount())
 	})
+}
+
+// TestUint256DivMod64 checks Div64, Mod64 and DivMod64 against big.Int
+// and their panic on a zero divisor
+func TestUint256DivMod64(t *testing.T) {
+	t.Parallel()
+	check := func(x Uint256, y uint64) {
+		xb, yb := RefU256(x), new(big.Int).SetUint64(y)
+		t := On(t, xb, yb)
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		q, r := x.divMod64(y)
+		require.Big(t, qb, RefU256(q))
+		require.Equal(t, rb.Uint64(), r)
+		require.Equal(t, q, x.Div64(y))
+		require.Equal(t, r, x.Mod64(y))
+	}
+	Values256(func(x Uint256) {
+		for _, y := range Divisors64 {
+			check(x, y)
+		}
+	})
+	for _, x := range Edge256 {
+		for _, y := range SeedDivisors64 {
+			check(Limbs256[Uint256](x), y)
+		}
+	}
+	require.Equal(t, "fat.Uint256.Div64: division by zero", PanicValue(func() { MaxUint256().Div64(0) }))
+	require.Equal(t, "fat.Uint256.Mod64: division by zero", PanicValue(func() { MaxUint256().Mod64(0) }))
+}
+
+// TestUint256DivMod checks Div, Mod, DivMod and the 128-bit forms with big.Int
+func TestUint256DivMod(t *testing.T) {
+	t.Parallel()
+	Pairs256(func(x, y Uint256) {
+		xb, yb := RefU256(x), RefU256(y)
+		t := On(t, xb, yb)
+		if y.L1|y.L0 != 0 {
+			yl := Uint128{y.L0, y.L1}
+			yb := RefU128(yl)
+			qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+			q, r := x.Div128(yl), x.Mod128(yl)
+			require.Big(On(t, yb), qb, RefU256(q))
+			require.Big(On(t, yb), rb, RefU128(r))
+		}
+		if y.IsZero() {
+			return
+		}
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		q, r := x.Div(y), x.Mod(y)
+		require.Big(t, qb, RefU256(q))
+		require.Big(t, rb, RefU256(r))
+	})
+	// pairs that reach the rare steps of divMod and divModKnuth
+	for _, p := range [][2]Uint256{
+		{{1, 0, 0xffffffffffffffff, 0x7fffffffffffffff}, {0xffff6e2fe55af23f, 0xfffeeba594cd7866, 1 << 63, 0}},
+		{{0x8ac7230489e80001, 0, 0, 1 << 63}, {0xffffffffffffffff, 3, 0, 2}},
+		{{0x7fffffffffffffff, 0x7fffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff}, {0x367ad, 1 << 63, 1, 0}},
+		{{0xb5beefe0eb38258c, 0xfffffc6ab012f493, 0xffffffffffffffff, 0x835b5184ab21060a}, {0x6b6a30956420c16, 1, 0, 0}},
+	} {
+		x, y := p[0], p[1]
+		xb, yb := RefU256(x), RefU256(y)
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		require.Big(On(t, xb, yb), qb, RefU256(x.Div(y)))
+		require.Big(On(t, xb, yb), rb, RefU256(x.Mod(y)))
+	}
+	require.Equal(t, "fat.Uint256.Div: division by zero", PanicValue(func() { MaxUint256().Div(Uint256{}) }))
+	require.Equal(t, "fat.Uint256.Mod: division by zero", PanicValue(func() { MaxUint256().Mod(Uint256{}) }))
+	require.Equal(t, "fat.Uint256.Div128: division by zero", PanicValue(func() { MaxUint256().Div128(Uint128{}) }))
+	require.Equal(t, "fat.Uint256.Mod128: division by zero", PanicValue(func() { MaxUint256().Mod128(Uint128{}) }))
+}
+
+// TestReciprocal2by1 checks reciprocal2by1 against bits.Div64
+// on the normalized test divisors
+func TestReciprocal2by1(t *testing.T) {
+	t.Parallel()
+	for _, ds := range [][]uint64{Divisors64, SeedDivisors64} {
+		for _, d := range ds {
+			d <<= uint(bits.LeadingZeros64(d))
+			want, _ := bits.Div64(^d, math.MaxUint64, d)
+			require.Equal(On(t, d), want, reciprocal2by1(d))
+		}
+	}
+}
+
+// TestReciprocal2by1Seed checks reciprocal2by1 against bits.Div64
+// at both ends of each class of the top 24 bits, where the seed is worst,
+// and on 2^24 random divisors.
+// The value before the last step must be exact or one short for the copies
+// that skip that step, the final result would hide a value two short
+func TestReciprocal2by1Seed(t *testing.T) {
+	t.Parallel()
+	r := rand.New(rand.NewSource(6))
+	short := 0
+	check := func(d uint64) {
+		want, _ := bits.Div64(^d, math.MaxUint64, d)
+		if got := reciprocal2by1(d); got != want {
+			require.Equal(On(t, d), want, got)
+		}
+		// reciprocal2by1 without its last step
+		v := (1<<47 - 1) / (d>>40 + 1)
+		d0 := d & 1
+		e := (v>>1)&-d0 - v*(d>>1+d0)
+		hi, _ := bits.Mul64(e, e)
+		e += hi >> 22
+		hi, _ = bits.Mul64(v<<19, e)
+		v = v<<41 + hi
+		if want-v > 1 {
+			require.Same(On(t, d), want, v)
+		}
+		short += int(want - v)
+	}
+	for k := uint64(1 << 23); k < 1<<24; k++ {
+		lo := k << 40
+		check(lo)
+		check(lo + 1)
+		check(lo + 2)
+		check(lo | (1<<40 - 2))
+		check(lo | (1<<40 - 1))
+		check(lo | r.Uint64()>>24)
+	}
+	for range 1 << 24 {
+		check(r.Uint64() | 1<<63)
+	}
+	// 1 in 30 of these are one short
+	require.True(t, short > 0)
+}
+
+// TestUint256DivModKnuth checks DivMod on the rare steps of a 3-limb divisor.
+// A remainder with the divisor's top limbs makes the digit 2^64-1,
+// one of q*<d2, d1> over a zero limb makes it one too big
+func TestUint256DivModKnuth(t *testing.T) {
+	t.Parallel()
+	r := rand.New(rand.NewSource(5))
+	for range RandomCount {
+		// d normalized with d0 > 0, x and d go right by s, low s bits clear
+		s := r.Intn(64)
+		low := ^uint64(0) << s
+		d := Uint256{(r.Uint64() | 1<<s) & low, r.Uint64(), r.Uint64() | 1<<63, 0}
+		var rem Uint256
+		if r.Intn(2) == 0 {
+			// <d2, d1, r0> with r0 < d0
+			rem = Uint256{(r.Uint64() % d.L0) & low, d.L1, d.L2, 0}
+		} else {
+			// q*<d2, d1> as three limbs
+			p := Uint256{d.L1, d.L2, 0, 0}.Mul64u(r.Uint64() | 1)
+			rem = Uint256{p.L0 & low, p.L1, p.L2, 0}
+		}
+		// x = (first*d + rem) << 64, with a zero limb under the remainder.
+		// The first digit is 0, 1 or any below 2^s that fits,
+		// one past the short top limb of y skips the estimate
+		first := uint64(r.Intn(2))
+		if r.Intn(2) == 0 {
+			first = r.Uint64() >> (64 - s) >> 1
+		}
+		y, rem := d.Rsh(s), rem.Rsh(s)
+		top := y.Mul64u(first).Addu(rem)
+		x := Uint256{0, top.L0, top.L1, top.L2}
+		xb, yb := RefU256(x), RefU256(y)
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		q, m := x.Div(y), x.Mod(y)
+		require.Big(On(t, xb, yb), qb, RefU256(q))
+		require.Big(On(t, xb, yb), rb, RefU256(m))
+		// the same steps in the Int256 kernels
+		checkInt256DivSigns(t)(x, y)
+	}
 }
 
 // TestUint256Rotate checks RotateLeft, RotateRight, Reverse and ReverseBytes
@@ -328,6 +494,42 @@ func BenchmarkUint256(b *testing.B) {
 		x, y := in.u256, in.u64
 		for i := range b.N {
 			sinkU256 = x[i&BenchMask].Mul64u(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Div", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Div(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mod", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Div/pow2", func(b *testing.B) {
+		x, y := in.u256, in.pow2
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Div(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mod/pow2", func(b *testing.B) {
+		x, y := in.u256, in.pow2
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Div64", func(b *testing.B) {
+		x, y := in.u256, in.u64
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Div64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mod64", func(b *testing.B) {
+		x, y := in.u256, in.u64
+		for i := range b.N {
+			SinkUint64 = x[i&BenchMask].Mod64(y[i&BenchMask])
 		}
 	})
 	b.Run("op=Lsh", func(b *testing.B) {

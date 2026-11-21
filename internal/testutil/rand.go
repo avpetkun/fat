@@ -55,3 +55,27 @@ func RandSigned256(r *rand.Rand, n int) [4]uint64 {
 	}
 	return l
 }
+
+// Divisors64 are edge divisors and a random one of every bit length
+var Divisors64 = func() []uint64 {
+	d := []uint64{1, 2, 3, 7, 10, 1e19, 1<<32 - 1, 1 << 32, 1<<32 + 1, math.MaxUint64 / 3,
+		1<<63 - 1, 1 << 63, 1<<63 + 1, math.MaxUint64 - 1, math.MaxUint64,
+		// the reciprocal is one short before its last step, as 1 in 40 are
+		0x8000800080000000, 0xc03fc03f00000000, 0xff0000ff00000000, 0xa1df3fa6fffffffe, 0x81c48fce6fe09024,
+		0xed409baf80000001, 0xa6a794bcffffffff, 0xc03fc03f, 0x4000400040000000}
+	r := rand.New(rand.NewSource(4))
+	for n := 1; n <= 64; n++ {
+		d = append(d, RandBits(r, n)[0])
+	}
+	return d
+}()
+
+// SeedDivisors64 hit both ends of every class of the top 9 bits.
+// The bits are those of the normalized divisor, which comes at many shifts
+var SeedDivisors64 = func() []uint64 {
+	var d []uint64
+	for k := uint64(256); k < 512; k++ {
+		d = append(d, k<<55>>(k%56), k<<55|(1<<55-1))
+	}
+	return d
+}()

@@ -436,6 +436,113 @@ var kI256 = Kind[Int256]{
 	},
 }
 
+// checkInt256DivSigns checks Div and Mod of +-x by +-y with big.Int.
+// It skips a zero y and magnitudes of 2^255 and more
+func checkInt256DivSigns(t *testing.T) func(x, y Uint256) {
+	return func(x, y Uint256) {
+		if (x.L3|y.L3)>>63 != 0 || y.IsZero() {
+			return
+		}
+		for i := range 4 {
+			xi, yi := x.withSign(-uint64(i&1)), y.withSign(-uint64(i>>1))
+			xb, yb := RefI256(xi), RefI256(yi)
+			t := On(t, xb, yb)
+			qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+			q, r := xi.Div(yi), xi.Mod(yi)
+			require.Big(t, qb, RefI256(q))
+			require.Big(t, rb, RefI256(r))
+		}
+	}
+}
+
+// TestInt256DivMod checks every Div, Mod and DivMod form against big.Int.
+// The divisors are 256, 128 and 64 bits wide, of either sign
+func TestInt256DivMod(t *testing.T) {
+	t.Parallel()
+	// check compares one division form with big.Int, the overflow included
+	check := func(t testing.TB, name string, xb, yb *big.Int, div func() Int256, divo func() (Int256, bool), divu func() Int256,
+		mod func() *big.Int) {
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		over := !BigFits(qb, 256, true)
+		wrap := WrapI256(qb)
+		q, o := divo()
+		require.Big(t, wrap, RefI256(q))
+		require.Equal(t, over, o)
+		require.Big(t, wrap, RefI256(divu()))
+		require.Big(t, rb, mod())
+		if over {
+			require.Equal(t, "fat.Int256."+name+": overflow", PanicValue(func() { div() }))
+			return
+		}
+		require.Big(t, qb, RefI256(div()))
+	}
+	check64 := func(x Int256, v int64) {
+		xb, vb := RefI256(x), big.NewInt(v)
+		check(On(t, xb, vb), "Div64", xb, vb, func() Int256 { return x.Div64(v) }, func() (Int256, bool) { return x.Div64o(v) },
+			func() Int256 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) })
+	}
+	Pairs256(func(x, y Int256) {
+		xb := RefI256(x)
+		if !y.IsZero() {
+			yb := RefI256(y)
+			check(On(t, xb, yb), "Div", xb, yb, func() Int256 { return x.Div(y) }, func() (Int256, bool) { return x.Divo(y) },
+				func() Int256 { return x.Divu(y) }, func() *big.Int { return RefI256(x.Mod(y)) })
+		}
+		if v := int64(y.L0); v != 0 {
+			check64(x, v)
+		}
+		if v := (Int128{y.L0, y.L1}); !v.IsZero() {
+			vb := RefI128(v)
+			check(On(t, xb, vb), "Div128", xb, vb, func() Int256 { return x.Div128(v) }, func() (Int256, bool) { return x.Div128o(v) },
+				func() Int256 { return x.Div128u(v) }, func() *big.Int { return RefI128(x.Mod128(v)) })
+		}
+	})
+	// every step of the reciprocal with a divisor of either sign:
+	// a limb one under the divisor shows a reciprocal that is one short
+	for _, d := range Divisors64 {
+		v := int64(d >> 1)
+		for _, l := range []uint64{0, 1, 1<<63 - 1, 1 << 63, math.MaxUint64 - 1, math.MaxUint64} {
+			if v != 0 {
+				check64(Int256{l, uint64(v) - 1, l, uint64(v) - 1}, v)
+				check64(Int256{l, l, uint64(v) - 1, 0}, -v)
+			}
+		}
+	}
+	// unsigned pairs as magnitudes reach the rare steps of the Int256 kernels
+	Pairs256(checkInt256DivSigns(t))
+	// 2-limb divisors: the first digit one too big,
+	// the rare second adjustment of the last 3-by-2 step
+	for _, p := range [][2]Uint256{
+		{{1, 2, 4, 7}, {5, 7, 0, 0}},
+		{{0xff4, 1 << 63, 1 << 63, 0}, {4, 0x414f5b3ec, 0, 0}},
+		{{2, MaxUint256().L1, MaxUint256().L2, 10}, {1 << 63, 0x8ac, 0, 0}},
+	} {
+		checkInt256DivSigns(t)(p[0], p[1])
+	}
+	// MinInt256 / -1 is the one overflow, the u and 64-bit forms have it too
+	q, over := MinInt256().Divo(NewInt256(-1))
+	require.Equal(t, MinInt256(), q)
+	require.True(t, over)
+	require.Equal(t, MinInt256(), MinInt256().Div64u(-1))
+	require.Equal(t, int64(0), MinInt256().Mod64(-1))
+	for name, fn := range map[string]func(){
+		"Div":     func() { MaxInt256().Div(Int256{}) },
+		"Divo":    func() { MaxInt256().Divo(Int256{}) },
+		"Divu":    func() { MaxInt256().Divu(Int256{}) },
+		"Mod":     func() { MaxInt256().Mod(Int256{}) },
+		"Div64":   func() { MaxInt256().Div64(0) },
+		"Div64o":  func() { MaxInt256().Div64o(0) },
+		"Div64u":  func() { MaxInt256().Div64u(0) },
+		"Mod64":   func() { MaxInt256().Mod64(0) },
+		"Div128":  func() { MaxInt256().Div128(Int128{}) },
+		"Div128o": func() { MaxInt256().Div128o(Int128{}) },
+		"Div128u": func() { MaxInt256().Div128u(Int128{}) },
+		"Mod128":  func() { MaxInt256().Mod128(Int128{}) },
+	} {
+		require.Equal(On(t, name), "fat.Int256."+name+": division by zero", PanicValue(fn))
+	}
+}
+
 // TestInt256Bits checks BitLen, Not, shifts, Bit and WithBit against big.Int
 func TestInt256Bits(t *testing.T) { RunBits(t, kI256) }
 

@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"sync"
 	"testing"
@@ -314,6 +315,87 @@ var kI128 = Kind[Int128]{
 		Add: Signed64(Int128.Add64), Sub: Signed64(Int128.Sub64), Mul: Signed64(Int128.Mul64),
 		Addo: Signed64Pair(Int128.Add64o), Subo: Signed64Pair(Int128.Sub64o), Mulo: Signed64Pair(Int128.Mul64o), Addu: Signed64(Int128.Add64u), Subu: Signed64(Int128.Sub64u), Mulu: Signed64(Int128.Mul64u),
 	},
+}
+
+// TestInt128DivMod checks the truncated division forms with big.Int
+func TestInt128DivMod(t *testing.T) {
+	t.Parallel()
+	// check compares one division form with big.Int, q and r truncated.
+	// Div panics where Divo reports an overflow
+	check := func(t testing.TB, name string, xb, yb *big.Int, div func() Int128, divo func() (Int128, bool), divu func() Int128,
+		mod func() *big.Int) {
+		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
+		over := !BigFits(qb, 128, true)
+		wrap := WrapI128(qb)
+		q, o := divo()
+		require.Big(t, wrap, RefI128(q))
+		require.Equal(t, over, o)
+		require.Big(t, wrap, RefI128(divu()))
+		require.Big(t, rb, mod())
+		if over {
+			require.Equal(t, "fat.Int128."+name+": overflow", PanicValue(func() { div() }))
+			return
+		}
+		require.Big(t, qb, RefI128(div()))
+	}
+	check64 := func(x Int128, v int64) {
+		xb, vb := RefI128(x), big.NewInt(v)
+		check(On(t, xb, vb), "Div64", xb, vb, func() Int128 { return x.Div64(v) }, func() (Int128, bool) { return x.Div64o(v) },
+			func() Int128 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) })
+	}
+	pair := func(x, y Int128) {
+		xb := RefI128(x)
+		if !y.IsZero() {
+			yb := RefI128(y)
+			check(On(t, xb, yb), "Div", xb, yb, func() Int128 { return x.Div(y) }, func() (Int128, bool) { return x.Divo(y) },
+				func() Int128 { return x.Divu(y) }, func() *big.Int { return RefI128(x.Mod(y)) })
+		}
+		if v := int64(y.L0); v != 0 {
+			check64(x, v)
+		}
+	}
+	Pairs128(pair)
+	// the borders of the division paths with every pair of signs
+	divPairs128(func(x, y Uint128) {
+		pair(Int128(x), Int128(y))
+		pair(Int128(x), Int128(y).Not())
+		pair(Int128(x).Not(), Int128(y))
+	})
+	// every step of the reciprocal with a divisor of either sign:
+	// a limb one under the divisor shows a reciprocal that is one short
+	for _, d := range Divisors64 {
+		v := int64(d >> 1)
+		for _, l := range []uint64{0, 1, 1<<63 - 1, 1 << 63, math.MaxUint64 - 1, math.MaxUint64} {
+			if v != 0 {
+				check64(Int128{l, uint64(v) - 1}, v)
+				check64(Int128{l, uint64(v) - 1}, -v)
+			}
+		}
+	}
+	// the one overflow, the edges have it too
+	q, over := MinInt128().Divo(NewInt128(-1))
+	require.Equal(t, MinInt128(), q)
+	require.True(t, over)
+	require.Equal(t, MinInt128(), MinInt128().Div64u(-1))
+	require.Equal(t, int64(0), MinInt128().Mod64(-1))
+	for name, fn := range map[string]func(){
+		"Div":    func() { MaxInt128().Div(Int128{}) },
+		"Divo":   func() { MaxInt128().Divo(Int128{}) },
+		"Divu":   func() { MaxInt128().Divu(Int128{}) },
+		"Mod":    func() { MaxInt128().Mod(Int128{}) },
+		"Div64":  func() { MaxInt128().Div64(0) },
+		"Div64o": func() { MaxInt128().Div64o(0) },
+		"Div64u": func() { MaxInt128().Div64u(0) },
+		"Mod64":  func() { MaxInt128().Mod64(0) },
+	} {
+		require.Equal(On(t, name), "fat.Int128."+name+": division by zero", PanicValue(fn))
+	}
+	// y == 0 is division by zero on every path, not an overflow for MinInt128
+	for _, x := range []Int128{{}, NewInt128(7), NewInt128(-7), MinInt128()} {
+		t := On(t, x)
+		require.Equal(t, "fat.Int128.Div: division by zero", PanicValue(func() { x.Div(Int128{}) }))
+		require.Equal(t, "fat.Int128.Divo: division by zero", PanicValue(func() { x.Divo(Int128{}) }))
+	}
 }
 
 // TestInt128Bits checks BitLen, Not, shifts, Bit and WithBit with big.Int

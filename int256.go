@@ -317,6 +317,22 @@ func (x Int256) uabs() Uint256 {
 	return Uint256{r0, r1, r2, r3}
 }
 
+// withSign returns x for m = 0 and -x wrapped around for m = ^0.
+// Any other m gives a wrong result
+func (x Uint256) withSign(m uint64) Int256 {
+	r0, c := bits.Add64(x.L0^m, m&1, 0)
+	r1, c := bits.Add64(x.L1^m, 0, c)
+	r2, c := bits.Add64(x.L2^m, 0, c)
+	return Int256{r0, r1, r2, x.L3 ^ m + c}
+}
+
+// withSign returns x for m = 0 and -x wrapped around for m = ^0.
+// Any other m gives a wrong result
+func (x Uint128) withSign(m uint64) Int128 {
+	r0, c := bits.Add64(x.L0^m, m&1, 0)
+	return Int128{r0, x.L1 ^ m + c}
+}
+
 // --- comparison -----------------------------------------
 
 // flipping the sign bits maps signed order onto unsigned order

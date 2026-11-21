@@ -14,10 +14,11 @@ const BenchMask = 1<<18 - 1
 
 // Sinks take a benchmark result on each iteration so the work is kept
 var (
-	SinkBool bool
-	SinkInt  int
-	SinkUint uint
-	SinkBig  *big.Int
+	SinkBool   bool
+	SinkInt    int
+	SinkUint   uint
+	SinkUint64 uint64
+	SinkBig    *big.Int
 )
 
 // BenchInputs holds 2^18 limb values per type, each test views them as its type
