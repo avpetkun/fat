@@ -34,6 +34,32 @@ func TestUint256Convert(t *testing.T) {
 		require.Equal(t, BigFits(xb, 256, true), x.IsInt256())
 		require.Equal(t, xb.Sign() == 0, x.IsZero())
 
+		// big.Int both ways, reusing dirty values
+		require.Big(t, xb, x.Big())
+		require.Big(t, xb, x.PutBig(big.NewInt(-12345)))
+		require.Big(t, xb, x.PutBig(new(big.Int)))
+		// reused words and the sign of a wider value
+		require.Big(t, xb, x.PutBig(new(big.Int).Neg(Two512)))
+		require.Equal(t, x, MustUint256FromBig(xb))
+		// small capacity words from SetBits
+		require.Equal(t, x, MustUint256FromBig(BigClip(xb)))
+		y, err := Uint256FromBig(xb)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+
+		// negative and oversized big.Int are out of range and zero the value
+		for _, b := range []*big.Int{BigSub(xb, Two256), BigAdd(xb, Two256), BigAdd(xb, new(big.Int).Lsh(Two256, 3))} {
+			t := On(t, b)
+			v, err := Uint256FromBig(b)
+			want := "fat.Uint256FromBig: out of range"
+			if b.Sign() < 0 {
+				want = "fat.Uint256FromBig: negative value"
+			}
+			require.Equal(t, want, err.Error())
+			require.True(t, v.IsZero())
+			require.Equal(t, "fat.Must"+want[len("fat."):], PanicValue(func() { MustUint256FromBig(b) }))
+		}
+
 		// the constructor and the widening zero the limbs above
 		require.Equal(t, Uint256{x.L0, 0, 0, 0}, NewUint256(x.L0))
 		require.Equal(t, Uint256{x.L0, x.L1, 0, 0}, Uint128{x.L0, x.L1}.Uint256())

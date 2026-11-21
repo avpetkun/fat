@@ -1,5 +1,10 @@
 package fat
 
+import (
+	"math/big"
+	"math/bits"
+)
+
 // Int128 is a signed 128-bit integer in two's complement.
 // L0 holds the low 64 bits and L1 the high ones
 type Int128 struct{ L0, L1 uint64 }
@@ -10,6 +15,52 @@ type Int128 struct{ L0, L1 uint64 }
 func NewInt128(v int64) Int128 {
 	ext := uint64(v >> 63)
 	return Int128{uint64(v), ext}
+}
+
+// Int128FromBig returns v, or zero and ErrRange when v does not fit
+func Int128FromBig(v *big.Int) (Int128, error) {
+	x, ok := int128FromBig(v)
+	if !ok {
+		return Int128{}, ErrRange("Int128FromBig")
+	}
+	return x, nil
+}
+
+// int128FromBig is Int128FromBig with ok in place of the error
+func int128FromBig(v *big.Int) (Int128, bool) {
+	words := v.Bits()
+	n := len(words)
+	if bits.UintSize == 64 && uint(n-1) < 2 {
+		// a test of the cap would mispredict, a single word has cap 1
+		// words[1], or words[0] masked off when there is one word
+		i := n - 1
+		l0 := uint64(words[0])
+		l1 := uint64(words[i]) & -uint64(i)
+		// all ones for a negative v, (x ^ m) - m then negates with no branch
+		m := bigNeg(v, l0)
+		r0, b := bits.Sub64(l0^m, m, 0)
+		r1, _ := bits.Sub64(l1^m, m, b)
+		// all ones when v fits: the sign flips out of range, MinInt128 keeps it
+		ok := uint64(int64(^(r1 ^ m)) >> 63)
+		return Int128{r0 & ok, r1 & ok}, ok != 0
+	}
+	// zero, past 128 bits, or 32-bit words
+	u, left := uint128FromWords(words)
+	m := uint64(v.Sign() >> 1)
+	r0, b := bits.Sub64(u.L0^m, m, 0)
+	r1, _ := bits.Sub64(u.L1^m, m, b)
+	// all ones when v fits: no words left and the sign kept
+	ok := uint64(int64(^(r1^m)&^uint64(-left)) >> 63)
+	return Int128{r0 & ok, r1 & ok}, ok != 0
+}
+
+// MustInt128FromBig is Int128FromBig that panics when v does not fit
+func MustInt128FromBig(v *big.Int) Int128 {
+	x, ok := int128FromBig(v)
+	if !ok {
+		panic("fat.MustInt128FromBig: out of range")
+	}
+	return x
 }
 
 // --- getters --------------------------------------------
@@ -124,4 +175,49 @@ func (x Int128) Uint256o() (r Uint256, overflow bool) {
 func (x Int128) Uint256u() Uint256 {
 	m := uint64(int64(x.L1) >> 63)
 	return Uint256{x.L0, x.L1, m, m}
+}
+
+// Big returns x as a new big.Int
+func (x Int128) Big() *big.Int {
+	// the Int and its words in one allocation
+	p := new(struct {
+		b big.Int
+		w [2 * limbWords]big.Word
+	})
+	// PutBig written out, the words need no capacity check
+	a := x.UnsignedAbs()
+	a.putWords(p.w[:])
+	p.b.SetBits(p.w[:a.words()*limbWords])
+	if x.IsNegative() {
+		p.b.Neg(&p.b)
+	}
+	return &p.b
+}
+
+// PutBig sets b to x and returns it, reusing the words of b if they fit
+func (x Int128) PutBig(b *big.Int) *big.Int {
+	// Uint128.PutBig on |x| written out, UnsignedAbs is right for MinInt128 too
+	a := x.UnsignedAbs()
+	words := b.Bits()
+	if cap(words) < 2*limbWords {
+		words = make([]big.Word, 2*limbWords)
+	}
+	w := words[:2*limbWords]
+	a.putWords(w)
+	b.SetBits(w[:a.words()*limbWords])
+	if x.IsNegative() {
+		b.Neg(b)
+	}
+	return b
+}
+
+// UnsignedAbs returns |x| as a Uint128, which holds 2^127 for MinInt128
+func (x Int128) UnsignedAbs() Uint128 {
+	// -x picked by conditional moves
+	r0, b := bits.Sub64(0, x.L0, 0)
+	r1, _ := bits.Sub64(0, x.L1, b)
+	if int64(x.L1) >= 0 {
+		r0, r1 = x.L0, x.L1
+	}
+	return Uint128{r0, r1}
 }

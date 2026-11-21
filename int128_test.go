@@ -36,6 +36,26 @@ func TestInt128Convert(t *testing.T) {
 		require.Equal(t, BigFits(xb, 128, false), x.IsUint128())
 		require.Equal(t, BigFits(xb, 256, false), x.IsUint256())
 
+		// big.Int both ways, reusing dirty values
+		require.Big(t, xb, x.Big())
+		require.Big(t, xb, x.PutBig(big.NewInt(-12345)))
+		// no words to reuse, and small capacity words from SetBits
+		require.Big(t, xb, x.PutBig(new(big.Int)))
+		require.Equal(t, x, MustInt128FromBig(BigClip(xb)))
+		require.Equal(t, x, MustInt128FromBig(xb))
+		y, err := Int128FromBig(xb)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+
+		// out of range big.Int zeroes the value
+		for _, b := range []*big.Int{BigSub(xb, Two128), BigAdd(xb, Two128), BigAdd(xb, new(big.Int).Lsh(Two128, 3))} {
+			t := On(t, b)
+			v, err := Int128FromBig(b)
+			require.Equal(t, "fat.Int128FromBig: out of range", err.Error())
+			require.True(t, v.IsZero())
+			require.Equal(t, "fat.MustInt128FromBig: out of range", PanicValue(func() { MustInt128FromBig(b) }))
+		}
+
 		// the constructor sign-extends into every limb
 		v64 := int64(x.L0)
 		require.Big(t, big.NewInt(v64), RefI128(NewInt128(v64)))

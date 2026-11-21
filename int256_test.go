@@ -36,6 +36,27 @@ func TestInt256Convert(t *testing.T) {
 		require.Equal(t, BigFits(xb, 64, false), x.IsUint64())
 		require.Equal(t, BigFits(xb, 128, false), x.IsUint128())
 		require.Equal(t, BigFits(xb, 256, false), x.IsUint256())
+		require.Big(t, new(big.Int).Abs(xb), RefU256(x.UnsignedAbs()))
+
+		// big.Int both ways, reusing dirty values
+		require.Big(t, xb, x.Big())
+		require.Big(t, xb, x.PutBig(big.NewInt(-12345)))
+		// no words to reuse, and small capacity words from SetBits
+		require.Big(t, xb, x.PutBig(new(big.Int)))
+		require.Equal(t, x, MustInt256FromBig(BigClip(xb)))
+		require.Equal(t, x, MustInt256FromBig(xb))
+		y, err := Int256FromBig(xb)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+
+		// out of range big.Int zeroes the value
+		for _, b := range []*big.Int{BigSub(xb, Two256), BigAdd(xb, Two256), BigAdd(xb, new(big.Int).Lsh(Two256, 3))} {
+			t := On(t, b)
+			v, err := Int256FromBig(b)
+			require.Equal(t, "fat.Int256FromBig: out of range", err.Error())
+			require.True(t, v.IsZero())
+			require.Equal(t, "fat.MustInt256FromBig: out of range", PanicValue(func() { MustInt256FromBig(b) }))
+		}
 
 		// the constructor and the widening sign-extend into every limb
 		v64, v128 := int64(x.L0), Int128{x.L0, x.L1}

@@ -15,6 +15,7 @@ type Shape256 interface {
 var (
 	Two255       = new(big.Int).Lsh(Big1, 255)
 	Two256       = new(big.Int).Lsh(Big1, 256)
+	Two512       = new(big.Int).Lsh(Big1, 512)
 	BigMinInt256 = new(big.Int).Neg(Two255)
 	BigMaxInt256 = new(big.Int).Sub(Two255, Big1)
 )

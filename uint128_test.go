@@ -30,7 +30,35 @@ func TestUint128Convert(t *testing.T) {
 		require.Equal(t, BigFits(xb, 128, true), x.IsInt128())
 		require.Equal(t, xb.Sign() == 0, x.IsZero())
 
+		// big.Int both ways, reusing dirty values
+		require.Big(t, xb, x.Big())
+		require.Big(t, xb, x.PutBig(big.NewInt(-12345)))
+		// no words to reuse, and small capacity words from SetBits
+		require.Big(t, xb, x.PutBig(new(big.Int)))
+		require.Equal(t, x, MustUint128FromBig(BigClip(xb)))
+		require.Big(t, xb, x.PutBig(new(big.Int).Neg(new(big.Int).Lsh(Big1, 200))))
+		require.Equal(t, x, MustUint128FromBig(xb))
+		y, err := Uint128FromBig(xb)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+
+		// negative and oversized big.Int are out of range and zero the value
+		for _, b := range []*big.Int{BigSub(xb, Two128), BigAdd(xb, Two128), BigAdd(xb, new(big.Int).Lsh(Two128, 3))} {
+			t := On(t, b)
+			v, err := Uint128FromBig(b)
+			want := "fat.Uint128FromBig: out of range"
+			if b.Sign() < 0 {
+				want = "fat.Uint128FromBig: negative value"
+			}
+			require.Equal(t, want, err.Error())
+			require.True(t, v.IsZero())
+			require.Equal(t, "fat.Must"+want[len("fat."):], PanicValue(func() { MustUint128FromBig(b) }))
+		}
+
 		// the constructor sets every limb
 		require.Equal(t, Uint128{x.L0, 0}, NewUint128(x.L0))
 	})
+
+	// an error with the input quotes it
+	require.Equal(t, `fat.Uint128FromHex: negative value "-1"`, ErrNegative{"Uint128FromHex", "-1"}.Error())
 }
