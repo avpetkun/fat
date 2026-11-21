@@ -620,3 +620,84 @@ func (x Uint128) Sub64u(y uint64) Uint128 {
 	x.L1, _ = bits.Sub64(x.L1, 0, carry)
 	return x
 }
+
+// --- mul ------------------------------------------------
+
+// Mul returns x * y, it panics on overflow
+func (x Uint128) Mul(y Uint128) Uint128 {
+	// a product that fits has a zero top limb in x or in y,
+	// so one cross term is enough: 4 multiplies for 6, and the body inlines.
+	// Faster than the full product in our benchmarks, most of all on Graviton
+	hi, lo := bits.Mul64(x.L0, y.L0)
+	b := x.L0
+	if x.L1 != 0 {
+		b = y.L0
+	}
+	h, m := bits.Mul64(x.L1|y.L1, b)
+	hi, c := bits.Add64(hi, m, 0)
+	// x.L1*y.L1 lands at 2^128 or above, min is nonzero when both are
+	if min(x.L1, y.L1)|h|c != 0 {
+		panic("fat.Uint128.Mul: overflow")
+	}
+	return Uint128{lo, hi}
+}
+
+// Mulo returns Mulu and whether x * y overflowed
+func (x Uint128) Mulo(y Uint128) (r Uint128, overflow bool) {
+	hi, lo := bits.Mul64(x.L0, y.L0)
+	// cross terms x.L0*y.L1 and x.L1*y.L0
+	h, m := bits.Mul64(x.L0, y.L1)
+	hi, c := bits.Add64(hi, m, 0)
+	// x.L1*y.L1 lands at 2^128 or above, min is nonzero when both are
+	over := min(x.L1, y.L1) | h | c
+	h, m = bits.Mul64(x.L1, y.L0)
+	hi, c = bits.Add64(hi, m, 0)
+	return Uint128{lo, hi}, over|h|c != 0
+}
+
+// Mulu returns x * y wrapped around as on a Go integer
+func (x Uint128) Mulu(y Uint128) Uint128 {
+	hi, lo := bits.Mul64(x.L0, y.L0)
+	hi += x.L0*y.L1 + x.L1*y.L0
+	return Uint128{lo, hi}
+}
+
+// Mule returns the 256-bit product x * y
+func (x Uint128) Mule(y Uint128) Uint256 {
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, l1 := bits.Mul64(x.L1, y.L0)
+	h2, l2 := bits.Mul64(x.L0, y.L1)
+	h3, l3 := bits.Mul64(x.L1, y.L1)
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c := bits.Add64(h1, l3, c)
+	p3 := h3 + c
+	p1, c = bits.Add64(p1, l2, 0)
+	p2, c = bits.Add64(p2, h2, c)
+	p3 += c
+	return Uint256{p0, p1, p2, p3}
+}
+
+// Mul64 returns x * y, it panics on overflow
+func (x Uint128) Mul64(y uint64) Uint128 {
+	r, c := x.Mul64o(y)
+	if c {
+		panic("fat.Uint128.Mul64: overflow")
+	}
+	return r
+}
+
+// Mul64o returns Mul64u and whether x * y overflowed
+func (x Uint128) Mul64o(y uint64) (r Uint128, overflow bool) {
+	hi, lo := bits.Mul64(x.L0, y)
+	h1, m1 := bits.Mul64(x.L1, y)
+	var c uint64
+	hi, c = bits.Add64(hi, m1, 0)
+	return Uint128{lo, hi}, h1|c != 0
+}
+
+// Mul64u returns x * y wrapped around as on a Go integer
+func (x Uint128) Mul64u(y uint64) Uint128 {
+	hi, lo := bits.Mul64(x.L0, y)
+	hi += x.L1 * y
+	return Uint128{lo, hi}
+}

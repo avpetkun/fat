@@ -80,6 +80,9 @@ func BigAdd(x, y *big.Int) *big.Int { return new(big.Int).Add(x, y) }
 // BigSub returns x - y in a new big.Int
 func BigSub(x, y *big.Int) *big.Int { return new(big.Int).Sub(x, y) }
 
+// BigMul returns x * y in a new big.Int
+func BigMul(x, y *big.Int) *big.Int { return new(big.Int).Mul(x, y) }
+
 // BigAnd returns x & y in a new big.Int
 func BigAnd(x, y *big.Int) *big.Int { return new(big.Int).And(x, y) }
 

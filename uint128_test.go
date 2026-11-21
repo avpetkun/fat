@@ -76,10 +76,23 @@ func TestUint128Arith(t *testing.T) {
 		{Name: "Subu", Width: 128, Fn: Plain(Uint128.Subu), Ref: BigSub},
 		{Name: "Subo", Width: 128, Fn: Uint128.Subo, Ref: BigSub, Over: true},
 
+		{Name: "Mul", Width: 128, Fn: Plain(Uint128.Mul), Ref: BigMul, Panic: "fat.Uint128.Mul: overflow"},
+		{Name: "Mulu", Width: 128, Fn: Plain(Uint128.Mulu), Ref: BigMul},
+		{Name: "Mulo", Width: 128, Fn: Uint128.Mulo, Ref: BigMul, Over: true},
+
 		{Name: "And", Width: 128, Fn: Plain(Uint128.And), Ref: BigAnd},
 		{Name: "Or", Width: 128, Fn: Plain(Uint128.Or), Ref: BigOr},
 		{Name: "Xor", Width: 128, Fn: Plain(Uint128.Xor), Ref: BigXor},
 		{Name: "AndNot", Width: 128, Fn: Plain(Uint128.AndNot), Ref: BigAndNot},
+	})
+}
+
+// TestUint128Mule checks the full 256-bit product with big.Int
+func TestUint128Mule(t *testing.T) {
+	t.Parallel()
+	Pairs128(func(x, y Uint128) {
+		xb, yb := RefU128(x), RefU128(y)
+		require.Big(On(t, xb, yb), BigMul(xb, yb), RefU256(x.Mule(y)))
 	})
 }
 
@@ -173,6 +186,48 @@ func BenchmarkUint128(b *testing.B) {
 		x, y := in.u128, in.v128
 		for i := range b.N {
 			sinkU128 = x[i&BenchMask].Subu(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Mul(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mulo", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU128, SinkBool = x[i&BenchMask].Mulo(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mulu", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Mulu(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mule", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mule(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64", func(b *testing.B) {
+		x, y := in.fx64, in.u64
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Mul64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64o", func(b *testing.B) {
+		x, y := in.u128, in.u64
+		for i := range b.N {
+			sinkU128, SinkBool = x[i&BenchMask].Mul64o(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64u", func(b *testing.B) {
+		x, y := in.u128, in.u64
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].Mul64u(y[i&BenchMask])
 		}
 	})
 	b.Run("op=Lsh", func(b *testing.B) {
@@ -399,8 +454,8 @@ var kU128 = Kind[Uint128]{
 	BitIdx: []int{0, 1, 63, 64, 126, 127, 128, 191, 192, 255, 256},
 	Ops64: Ops64[Uint128]{
 		New: NewUint128, Cmp: Uint128.Cmp64,
-		Add: Uint128.Add64, Sub: Uint128.Sub64,
-		Addo: Uint128.Add64o, Subo: Uint128.Sub64o, Addu: Uint128.Add64u, Subu: Uint128.Sub64u,
+		Add: Uint128.Add64, Sub: Uint128.Sub64, Mul: Uint128.Mul64,
+		Addo: Uint128.Add64o, Subo: Uint128.Sub64o, Mulo: Uint128.Mul64o, Addu: Uint128.Add64u, Subu: Uint128.Sub64u, Mulu: Uint128.Mul64u,
 	},
 }
 
@@ -431,6 +486,7 @@ func TestUint128Constants(t *testing.T) {
 	x := NewUint128(5)
 	require.Equal(t, NewUint128(7), x.Add64(2))
 	require.Equal(t, NewUint128(3), x.Sub64(2))
+	require.Equal(t, NewUint128(10), x.Mul64(2))
 	require.Equal(t, 1, x.Cmp64(4))
 	x = x.Add64(1).Sub64(3)
 	require.Equal(t, NewUint128(3), x)

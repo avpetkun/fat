@@ -73,11 +73,11 @@ func (k Kind[T]) Over() *big.Int {
 
 // Ops64 are the methods with a 64-bit operand, passed as its uint64 bits
 type Ops64[T any] struct {
-	New        func(v uint64) T
-	Cmp        func(x T, v uint64) int
-	Add, Sub   func(x T, v uint64) T
-	Addo, Subo func(x T, v uint64) (T, bool)
-	Addu, Subu func(x T, v uint64) T
+	New              func(v uint64) T
+	Cmp              func(x T, v uint64) int
+	Add, Sub, Mul    func(x T, v uint64) T
+	Addo, Subo, Mulo func(x T, v uint64) (T, bool)
+	Addu, Subu, Mulu func(x T, v uint64) T
 }
 
 // Signed64 adapts a method with an int64 operand to the uint64 one of Ops64

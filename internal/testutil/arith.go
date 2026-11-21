@@ -58,6 +58,7 @@ func RunOps64[T Num[T]](t *testing.T, k Kind[T]) {
 	ops := []op{
 		{"Add64", BigAdd, o.Add, o.Addo},
 		{"Sub64", BigSub, o.Sub, o.Subo},
+		{"Mul64", BigMul, o.Mul, o.Mulo},
 	}
 	k.Pairs(func(x, y T) {
 		xb := k.Ref(x)
@@ -74,6 +75,7 @@ func RunOps64[T Num[T]](t *testing.T, k Kind[T]) {
 		// the u forms wrap where the plain ones panic
 		require.Big(t, k.Wrap(BigAdd(xb, vb)), k.Ref(o.Addu(x, v)))
 		require.Big(t, k.Wrap(BigSub(xb, vb)), k.Ref(o.Subu(x, v)))
+		require.Big(t, k.Wrap(BigMul(xb, vb)), k.Ref(o.Mulu(x, v)))
 		for _, op := range ops {
 			want := op.ref(xb, vb)
 			wrapped := k.Wrap(want)

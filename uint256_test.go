@@ -1,7 +1,9 @@
 package fat
 
 import (
+	"math"
 	"math/big"
+	"math/rand"
 	"sync"
 	"testing"
 
@@ -86,10 +88,27 @@ func TestUint256Arith(t *testing.T) {
 		{Name: "Sub128u", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Sub128u(Uint128{y.L0, y.L1}) }), Ref: BigSub},
 		{Name: "Sub128o", Width: 128, Fn: func(x, y Uint256) (Uint256, bool) { return x.Sub128o(Uint128{y.L0, y.L1}) }, Ref: BigSub, Over: true},
 
+		{Name: "Mul", Width: 256, Fn: Plain(Uint256.Mul), Ref: BigMul, Panic: "fat.Uint256.Mul: overflow"},
+		{Name: "Mulu", Width: 256, Fn: Plain(Uint256.Mulu), Ref: BigMul},
+		{Name: "Mulo", Width: 256, Fn: Uint256.Mulo, Ref: BigMul, Over: true},
+		{Name: "Mul128", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Mul128(Uint128{y.L0, y.L1}) }), Ref: BigMul, Panic: "fat.Uint256.Mul128: overflow"},
+		{Name: "Mul128u", Width: 128, Fn: Plain(func(x, y Uint256) Uint256 { return x.Mul128u(Uint128{y.L0, y.L1}) }), Ref: BigMul},
+		{Name: "Mul128o", Width: 128, Fn: func(x, y Uint256) (Uint256, bool) { return x.Mul128o(Uint128{y.L0, y.L1}) }, Ref: BigMul, Over: true},
+
 		{Name: "And", Width: 256, Fn: Plain(Uint256.And), Ref: BigAnd},
 		{Name: "Or", Width: 256, Fn: Plain(Uint256.Or), Ref: BigOr},
 		{Name: "Xor", Width: 256, Fn: Plain(Uint256.Xor), Ref: BigXor},
 		{Name: "AndNot", Width: 256, Fn: Plain(Uint256.AndNot), Ref: BigAndNot},
+	})
+}
+
+// TestUint256Mule checks the full 512-bit product against big.Int
+func TestUint256Mule(t *testing.T) {
+	t.Parallel()
+	Pairs256(func(x, y Uint256) {
+		xb, yb := RefU256(x), RefU256(y)
+		hi, lo := x.Mule(y)
+		require.Big(On(t, xb, yb), BigMul(xb, yb), BigAdd(new(big.Int).Lsh(RefU256(hi), 256), RefU256(lo)))
 	})
 }
 
@@ -119,6 +138,54 @@ func TestUint256Rotate(t *testing.T) {
 		require.Big(t, BigReverse(xb, 256), RefU256(x.Reverse()))
 		require.Big(t, BigReverseBytes(xb, 256), RefU256(x.ReverseBytes()))
 	})
+}
+
+// TestUint256MuloLimbs checks Mulo, Mul and Mul128o on every limb pattern.
+// The overflow test branches on the zero limbs
+func TestUint256MuloLimbs(t *testing.T) {
+	t.Parallel()
+	r := rand.New(rand.NewSource(3))
+	limbs := func(mask int) Uint256 {
+		var l [4]uint64
+		for i := range l {
+			if mask>>i&1 != 0 {
+				// small, full and random limbs
+				switch r.Intn(3) {
+				case 0:
+					l[i] = 1
+				case 1:
+					l[i] = math.MaxUint64
+				default:
+					l[i] = r.Uint64() | 1
+				}
+			}
+		}
+		return Uint256{l[0], l[1], l[2], l[3]}
+	}
+	for range 50 {
+		for mx := range 16 {
+			for my := range 16 {
+				x, y := limbs(mx), limbs(my)
+				xb, yb := RefU256(x), RefU256(y)
+				want := BigMul(xb, yb)
+				t := On(t, xb, yb)
+				got, c := x.Mulo(y)
+				require.Big(t, WrapU256(want), RefU256(got))
+				require.Equal(t, !FitsU256(want), c)
+				// Mul goes through mulFit, which orders the operands by limbs
+				if FitsU256(want) {
+					require.Big(t, want, RefU256(x.Mul(y)))
+				} else {
+					require.Equal(t, "fat.Uint256.Mul: overflow", PanicValue(func() { x.Mul(y) }))
+				}
+				y128 := Uint128{y.L0, y.L1}
+				want = BigMul(xb, LimbsBig(y.L0, y.L1))
+				got, c = x.Mul128o(y128)
+				require.Big(t, WrapU256(want), RefU256(got))
+				require.Equal(t, !FitsU256(want), c)
+			}
+		}
+	}
 }
 
 // BenchmarkUint256 measures the methods on 2^18 values of random bit length.
@@ -201,6 +268,66 @@ func BenchmarkUint256(b *testing.B) {
 		x, y := in.u256, in.v256
 		for i := range b.N {
 			sinkU256 = x[i&BenchMask].Subu(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mul(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mulo", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256, SinkBool = x[i&BenchMask].Mulo(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mulu", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mulu(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mule", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256, sink2U256 = x[i&BenchMask].Mule(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul128", func(b *testing.B) {
+		x, y := in.fx128, in.u128
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mul128(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul128o", func(b *testing.B) {
+		x, y := in.u256, in.u128
+		for i := range b.N {
+			sinkU256, SinkBool = x[i&BenchMask].Mul128o(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul128u", func(b *testing.B) {
+		x, y := in.u256, in.u128
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mul128u(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64", func(b *testing.B) {
+		x, y := in.fx64, in.u64
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mul64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64o", func(b *testing.B) {
+		x, y := in.u256, in.u64
+		for i := range b.N {
+			sinkU256, SinkBool = x[i&BenchMask].Mul64o(y[i&BenchMask])
+		}
+	})
+	b.Run("op=Mul64u", func(b *testing.B) {
+		x, y := in.u256, in.u64
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].Mul64u(y[i&BenchMask])
 		}
 	})
 	b.Run("op=Lsh", func(b *testing.B) {
@@ -323,8 +450,8 @@ var kU256 = Kind[Uint256]{
 	},
 	Ops64: Ops64[Uint256]{
 		New: NewUint256, Cmp: Uint256.Cmp64,
-		Add: Uint256.Add64, Sub: Uint256.Sub64,
-		Addo: Uint256.Add64o, Subo: Uint256.Sub64o, Addu: Uint256.Add64u, Subu: Uint256.Sub64u,
+		Add: Uint256.Add64, Sub: Uint256.Sub64, Mul: Uint256.Mul64,
+		Addo: Uint256.Add64o, Subo: Uint256.Sub64o, Mulo: Uint256.Mul64o, Addu: Uint256.Add64u, Subu: Uint256.Sub64u, Mulu: Uint256.Mul64u,
 	},
 }
 
@@ -355,6 +482,7 @@ func TestUint256Constants(t *testing.T) {
 	x := NewUint256(5)
 	require.Equal(t, NewUint256(7), x.Add64(2))
 	require.Equal(t, NewUint256(3), x.Sub64(2))
+	require.Equal(t, NewUint256(10), x.Mul64(2))
 	require.Equal(t, 1, x.Cmp64(4))
 	x = x.Add64(1).Sub64(3)
 	require.Equal(t, NewUint256(3), x)

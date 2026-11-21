@@ -860,3 +860,276 @@ func (x Uint256) Sub64u(y uint64) Uint256 {
 	x.L3, _ = bits.Sub64(x.L3, 0, carry)
 	return x
 }
+
+// --- mul ------------------------------------------------
+
+// Mul returns x * y, it panics on overflow
+func (x Uint256) Mul(y Uint256) Uint256 {
+	// 14 multiplies in place of the 20 of Mulo, faster in our benchmarks
+	// on Graviton, where the multiplier is the bound
+	r, c := x.mulFit(y)
+	if c {
+		panic("fat.Uint256.Mul: overflow")
+	}
+	return r
+}
+
+// mulFit is Mulo for a caller that drops r on overflow.
+// r is not the wrapped product when both high halves are nonzero.
+// Two nonzero high halves overflow, so the operand with a zero one goes in
+// as the 128-bit y of Mul128o by conditional moves: 14 multiplies
+func (x Uint256) mulFit(y Uint256) (r Uint256, overflow bool) {
+	xh, yh := x.L2|x.L3, y.L2|y.L3
+	x0, x1, x2, x3, y0, y1 := x.L0, x.L1, x.L2, x.L3, y.L0, y.L1
+	if yh != 0 {
+		x0, x1, x2, x3, y0, y1 = y.L0, y.L1, y.L2, y.L3, x.L0, x.L1
+	}
+	// x * y0 = p0..p4
+	h0, p0 := bits.Mul64(x0, y0)
+	h1, p1 := bits.Mul64(x1, y0)
+	h2, p2 := bits.Mul64(x2, y0)
+	h3, p3 := bits.Mul64(x3, y0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// x * y1 at limb 1 without x3 * y1, which overflows when nonzero
+	g0, q1 := bits.Mul64(x0, y1)
+	g1, q2 := bits.Mul64(x1, y1)
+	g2, q3 := bits.Mul64(x2, y1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, _ := bits.Add64(g2, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	// else the product is below 2^320 and limb 4 doesn't wrap
+	r4, _ := bits.Add64(p4, q4, c)
+	return Uint256{p0, r1, r2, r3}, r4|min(x3, y1)|min(xh, yh) != 0
+}
+
+// Mulo returns Mulu and whether x * y overflowed
+func (x Uint256) Mulo(y Uint256) (r Uint256, overflow bool) {
+	// rows cut at limb 4, products past it are caught by the min test below
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	h3, p3 := bits.Mul64(x.L3, y.L0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	g0, q1 := bits.Mul64(x.L0, y.L1)
+	g1, q2 := bits.Mul64(x.L1, y.L1)
+	g2, q3 := bits.Mul64(x.L2, y.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, _ := bits.Add64(g2, 0, c)
+	f0, s2 := bits.Mul64(x.L0, y.L2)
+	f1, s3 := bits.Mul64(x.L1, y.L2)
+	s3, c = bits.Add64(s3, f0, 0)
+	s4, _ := bits.Add64(f1, 0, c)
+	e0, t3 := bits.Mul64(x.L0, y.L3)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	r4, _ := bits.Add64(p4, q4, c)
+	r2, c = bits.Add64(r2, s2, 0)
+	r3, c = bits.Add64(r3, s3, c)
+	r4, _ = bits.Add64(r4, s4, c)
+	r3, c = bits.Add64(r3, t3, 0)
+	r4, _ = bits.Add64(r4, e0, c)
+	// min != 0 is a nonzero product past limb 4, else r4 is exact limb 4
+	y23 := y.L2 | y.L3
+	return Uint256{p0, r1, r2, r3}, r4|min(x.L3, y.L1|y23)|min(x.L2, y23)|min(x.L1, y.L3) != 0
+}
+
+// Mulu returns x * y wrapped around as on a Go integer
+func (x Uint256) Mulu(y Uint256) Uint256 {
+	// row by row, carries ride ADCS chains
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, _ := bits.Add64(x.L3*y.L0, h2, c)
+	g0, q1 := bits.Mul64(x.L0, y.L1)
+	g1, q2 := bits.Mul64(x.L1, y.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, _ := bits.Add64(x.L2*y.L1, g1, c)
+	f0, s2 := bits.Mul64(x.L0, y.L2)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, _ := bits.Add64(p3, q3, c)
+	r2, c = bits.Add64(r2, s2, 0)
+	r3, _ = bits.Add64(r3, x.L1*y.L2+f0+x.L0*y.L3, c)
+	return Uint256{r0, r1, r2, r3}
+}
+
+// Mule returns the 512-bit product x * y as hi * 2^256 + lo
+func (x Uint256) Mule(y Uint256) (hi, lo Uint256) {
+	// row by row, each row a chain of the low halves into the running sum,
+	// faster than one chain per half in our benchmarks
+	// x * y.L0
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	h3, p3 := bits.Mul64(x.L3, y.L0)
+	p1, c := bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// x * y.L1
+	h0, q1 := bits.Mul64(x.L0, y.L1)
+	h1, q2 := bits.Mul64(x.L1, y.L1)
+	h2, q3 := bits.Mul64(x.L2, y.L1)
+	h3, q4 := bits.Mul64(x.L3, y.L1)
+	q2, c = bits.Add64(q2, h0, 0)
+	q3, c = bits.Add64(q3, h1, c)
+	q4, c = bits.Add64(q4, h2, c)
+	p5, _ := bits.Add64(h3, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	p2, c = bits.Add64(p2, q2, c)
+	p3, c = bits.Add64(p3, q3, c)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, _ = bits.Add64(p5, 0, c)
+	// x * y.L2
+	h0, q2 = bits.Mul64(x.L0, y.L2)
+	h1, q3 = bits.Mul64(x.L1, y.L2)
+	h2, q4 = bits.Mul64(x.L2, y.L2)
+	h3, q5 := bits.Mul64(x.L3, y.L2)
+	q3, c = bits.Add64(q3, h0, 0)
+	q4, c = bits.Add64(q4, h1, c)
+	q5, c = bits.Add64(q5, h2, c)
+	p6, _ := bits.Add64(h3, 0, c)
+	r2, c := bits.Add64(p2, q2, 0)
+	p3, c = bits.Add64(p3, q3, c)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, c = bits.Add64(p5, q5, c)
+	p6, _ = bits.Add64(p6, 0, c)
+	// x * y.L3
+	h0, q3 = bits.Mul64(x.L0, y.L3)
+	h1, q4 = bits.Mul64(x.L1, y.L3)
+	h2, q5 = bits.Mul64(x.L2, y.L3)
+	h3, q6 := bits.Mul64(x.L3, y.L3)
+	q4, c = bits.Add64(q4, h0, 0)
+	q5, c = bits.Add64(q5, h1, c)
+	q6, c = bits.Add64(q6, h2, c)
+	p7, _ := bits.Add64(h3, 0, c)
+	r3, c := bits.Add64(p3, q3, 0)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, c = bits.Add64(p5, q5, c)
+	p6, c = bits.Add64(p6, q6, c)
+	p7, _ = bits.Add64(p7, 0, c)
+	return Uint256{p4, p5, p6, p7}, Uint256{r0, r1, r2, r3}
+}
+
+// Mul128 returns x * y, it panics on overflow
+func (x Uint256) Mul128(y Uint128) Uint256 {
+	r, c := x.Mul128o(y)
+	if c {
+		panic("fat.Uint256.Mul128: overflow")
+	}
+	return r
+}
+
+// Mul128o returns Mul128u and whether x * y overflowed
+func (x Uint256) Mul128o(y Uint128) (r Uint256, overflow bool) {
+	// x * y.L0 = p0..p4
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	h3, p3 := bits.Mul64(x.L3, y.L0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// x * y.L1 at limb 1 without x.L3 * y.L1, which overflows when nonzero
+	g0, q1 := bits.Mul64(x.L0, y.L1)
+	g1, q2 := bits.Mul64(x.L1, y.L1)
+	g2, q3 := bits.Mul64(x.L2, y.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, _ := bits.Add64(g2, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	// else the product is below 2^320 and limb 4 doesn't wrap
+	r4, _ := bits.Add64(p4, q4, c)
+	return Uint256{p0, r1, r2, r3}, r4|min(x.L3, y.L1) != 0
+}
+
+// Mul128u returns x * y wrapped around as on a Go integer
+func (x Uint256) Mul128u(y Uint128) Uint256 {
+	// x * y.L0
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, a1 := bits.Mul64(x.L1, y.L0)
+	h2, a2 := bits.Mul64(x.L2, y.L0)
+	var c uint64
+	a1, c = bits.Add64(a1, h0, 0)
+	a2, c = bits.Add64(a2, h1, c)
+	a3, _ := bits.Add64(x.L3*y.L0, h2, c)
+	// x * y.L1, one limb up
+	g0, b1 := bits.Mul64(x.L0, y.L1)
+	g1, b2 := bits.Mul64(x.L1, y.L1)
+	b2, c = bits.Add64(b2, g0, 0)
+	b3, _ := bits.Add64(x.L2*y.L1, g1, c)
+	r1, c := bits.Add64(a1, b1, 0)
+	r2, c := bits.Add64(a2, b2, c)
+	r3, _ := bits.Add64(a3, b3, c)
+	return Uint256{r0, r1, r2, r3}
+}
+
+// Mul64 returns x * y, it panics on overflow
+func (x Uint256) Mul64(y uint64) Uint256 {
+	// Mul64o inlines and would bring the product and a stack frame
+	// for the panic in here
+	r, c := x.mul64o(y)
+	if c {
+		panic("fat.Uint256.Mul64: overflow")
+	}
+	return r
+}
+
+// Mul64o returns Mul64u and whether x * y overflowed
+func (x Uint256) Mul64o(y uint64) (r Uint256, overflow bool) {
+	// the product into r limb by limb stays within the inline budget,
+	// a call spills the caller's values
+	var h, c uint64
+	h, r.L0 = bits.Mul64(x.L0, y)
+	g, l := bits.Mul64(x.L1, y)
+	r.L1, c = bits.Add64(l, h, 0)
+	h, l = bits.Mul64(x.L2, y)
+	r.L2, c = bits.Add64(l, g, c)
+	g, l = bits.Mul64(x.L3, y)
+	r.L3, c = bits.Add64(l, h, c)
+	return r, g|c != 0
+}
+
+// mul64o is Mul64o in the form that does not inline, for Mul64
+func (x Uint256) mul64o(y uint64) (r Uint256, overflow bool) {
+	h0, r0 := bits.Mul64(x.L0, y)
+	h1, r1 := bits.Mul64(x.L1, y)
+	h2, r2 := bits.Mul64(x.L2, y)
+	h3, r3 := bits.Mul64(x.L3, y)
+	r1, c := bits.Add64(r1, h0, 0)
+	r2, c = bits.Add64(r2, h1, c)
+	r3, c = bits.Add64(r3, h2, c)
+	return Uint256{r0, r1, r2, r3}, h3|c != 0
+}
+
+// Mul64u returns x * y wrapped around as on a Go integer
+func (x Uint256) Mul64u(y uint64) Uint256 {
+	v := y
+	h0, r0 := bits.Mul64(x.L0, v)
+	h1, r1 := bits.Mul64(x.L1, v)
+	h2, r2 := bits.Mul64(x.L2, v)
+	var c uint64
+	r1, c = bits.Add64(r1, h0, 0)
+	r2, c = bits.Add64(r2, h1, c)
+	return Uint256{r0, r1, r2, x.L3*v + h2 + c}
+}

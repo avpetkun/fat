@@ -819,3 +819,303 @@ func (x Int256) Sub64u(y int64) Int256 {
 	x.L3, _ = bits.Sub64(x.L3, ext, carry)
 	return x
 }
+
+// --- mul ------------------------------------------------
+
+// Mul returns x * y, it panics on overflow
+func (x Int256) Mul(y Int256) Int256 {
+	// 14 multiplies in place of the 20 of Mulo.
+	// Faster in our benchmarks on Graviton, where the multiplier is the bound
+	r, c := x.mulFit(y)
+	if c {
+		panic("fat.Int256.Mul: overflow")
+	}
+	return r
+}
+
+// mulFit is Mulo for a caller that drops r on overflow, r is wrong then.
+// It is Uint256.mulFit on |x| and |y| written out
+func (x Int256) mulFit(y Int256) (r Int256, overflow bool) {
+	m := uint64(int64(x.L3^y.L3) >> 63)
+	a, v := x.UnsignedAbs(), y.UnsignedAbs()
+	ah, vh := a.L2|a.L3, v.L2|v.L3
+	x0, x1, x2, x3, y0, y1 := a.L0, a.L1, a.L2, a.L3, v.L0, v.L1
+	if vh != 0 {
+		x0, x1, x2, x3, y0, y1 = v.L0, v.L1, v.L2, v.L3, a.L0, a.L1
+	}
+	h0, p0 := bits.Mul64(x0, y0)
+	h1, p1 := bits.Mul64(x1, y0)
+	h2, p2 := bits.Mul64(x2, y0)
+	h3, p3 := bits.Mul64(x3, y0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	g0, q1 := bits.Mul64(x0, y1)
+	g1, q2 := bits.Mul64(x1, y1)
+	g2, q3 := bits.Mul64(x2, y1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, _ := bits.Add64(g2, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	r4, _ := bits.Add64(p4, q4, c)
+	over := r4 | min(x3, y1) | min(ah, vh)
+	// the sign as in Mulo
+	r0, b := bits.Sub64(p0^m, m, 0)
+	r1, b = bits.Sub64(r1^m, m, b)
+	r2, b = bits.Sub64(r2^m, m, b)
+	r3, b = bits.Sub64(r3^m, m, b)
+	over |= (r3 ^ m) >> 63 &^ (m &^ b)
+	return Int256{r0, r1, r2, r3}, over != 0
+}
+
+// Mulo returns Mulu and whether x * y overflowed
+func (x Int256) Mulo(y Int256) (r Int256, overflow bool) {
+	m := uint64(int64(x.L3^y.L3) >> 63)
+	a, v := x.UnsignedAbs(), y.UnsignedAbs()
+	// Uint256.Mulo on |x| and |y|: rows cut at limb 4.
+	// The products past limb 4 are caught by the min test below
+	h0, p0 := bits.Mul64(a.L0, v.L0)
+	h1, p1 := bits.Mul64(a.L1, v.L0)
+	h2, p2 := bits.Mul64(a.L2, v.L0)
+	h3, p3 := bits.Mul64(a.L3, v.L0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	g0, q1 := bits.Mul64(a.L0, v.L1)
+	g1, q2 := bits.Mul64(a.L1, v.L1)
+	g2, q3 := bits.Mul64(a.L2, v.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, _ := bits.Add64(g2, 0, c)
+	f0, s2 := bits.Mul64(a.L0, v.L2)
+	f1, s3 := bits.Mul64(a.L1, v.L2)
+	s3, c = bits.Add64(s3, f0, 0)
+	s4, _ := bits.Add64(f1, 0, c)
+	e0, t3 := bits.Mul64(a.L0, v.L3)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	r4, _ := bits.Add64(p4, q4, c)
+	r2, c = bits.Add64(r2, s2, 0)
+	r3, c = bits.Add64(r3, s3, c)
+	r4, _ = bits.Add64(r4, s4, c)
+	r3, c = bits.Add64(r3, t3, 0)
+	r4, _ = bits.Add64(r4, e0, c)
+	// min != 0 is a nonzero product past limb 4, else r4 is exactly limb 4.
+	// The carries ride ADC into r4, an OR of each would cost a CSET more
+	v23 := v.L2 | v.L3
+	over := r4 | min(a.L3, v.L1|v23) | min(a.L2, v23) | min(a.L1, v.L3)
+	// (r ^ m) - m, m as a 256-bit value is 0 or -1
+	r0, b := bits.Sub64(p0^m, m, 0)
+	r1, b = bits.Sub64(r1^m, m, b)
+	r2, b = bits.Sub64(r2^m, m, b)
+	r3, b = bits.Sub64(r3^m, m, b)
+	// it fits if the sign is m, or for r = 0: the only negation with no borrow
+	over |= (r3 ^ m) >> 63 &^ (m &^ b)
+	return Int256{r0, r1, r2, r3}, over != 0
+}
+
+// Mulu returns x * y wrapped around as on a Go integer
+func (x Int256) Mulu(y Int256) Int256 {
+	return Int256(Uint256(x).Mulu(Uint256(y)))
+}
+
+// Mule returns the 512-bit product x * y as hi * 2^256 + lo, lo unsigned
+func (x Int256) Mule(y Int256) (hi Int256, lo Uint256) {
+	// Uint256.Mule written out, faster than its call in our benchmarks
+	// x * y.L0
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	h3, p3 := bits.Mul64(x.L3, y.L0)
+	p1, c := bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// x * y.L1
+	h0, q1 := bits.Mul64(x.L0, y.L1)
+	h1, q2 := bits.Mul64(x.L1, y.L1)
+	h2, q3 := bits.Mul64(x.L2, y.L1)
+	h3, q4 := bits.Mul64(x.L3, y.L1)
+	q2, c = bits.Add64(q2, h0, 0)
+	q3, c = bits.Add64(q3, h1, c)
+	q4, c = bits.Add64(q4, h2, c)
+	p5, _ := bits.Add64(h3, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	p2, c = bits.Add64(p2, q2, c)
+	p3, c = bits.Add64(p3, q3, c)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, _ = bits.Add64(p5, 0, c)
+	// x * y.L2
+	h0, q2 = bits.Mul64(x.L0, y.L2)
+	h1, q3 = bits.Mul64(x.L1, y.L2)
+	h2, q4 = bits.Mul64(x.L2, y.L2)
+	h3, q5 := bits.Mul64(x.L3, y.L2)
+	q3, c = bits.Add64(q3, h0, 0)
+	q4, c = bits.Add64(q4, h1, c)
+	q5, c = bits.Add64(q5, h2, c)
+	p6, _ := bits.Add64(h3, 0, c)
+	r2, c := bits.Add64(p2, q2, 0)
+	p3, c = bits.Add64(p3, q3, c)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, c = bits.Add64(p5, q5, c)
+	p6, _ = bits.Add64(p6, 0, c)
+	// x * y.L3
+	h0, q3 = bits.Mul64(x.L0, y.L3)
+	h1, q4 = bits.Mul64(x.L1, y.L3)
+	h2, q5 = bits.Mul64(x.L2, y.L3)
+	h3, q6 := bits.Mul64(x.L3, y.L3)
+	q4, c = bits.Add64(q4, h0, 0)
+	q5, c = bits.Add64(q5, h1, c)
+	q6, c = bits.Add64(q6, h2, c)
+	p7, _ := bits.Add64(h3, 0, c)
+	r3, c := bits.Add64(p3, q3, 0)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, c = bits.Add64(p5, q5, c)
+	p6, c = bits.Add64(p6, q6, c)
+	p7, _ = bits.Add64(p7, 0, c)
+	// signed = unsigned - 2^256*y if x < 0 - 2^256*x if y < 0.
+	// The corrections are summed off the path of the product
+	mx := uint64(int64(x.L3) >> 63)
+	my := uint64(int64(y.L3) >> 63)
+	k0, c := bits.Add64(y.L0&mx, x.L0&my, 0)
+	k1, c := bits.Add64(y.L1&mx, x.L1&my, c)
+	k2, c := bits.Add64(y.L2&mx, x.L2&my, c)
+	k3, _ := bits.Add64(y.L3&mx, x.L3&my, c)
+	p4, c = bits.Sub64(p4, k0, 0)
+	p5, c = bits.Sub64(p5, k1, c)
+	p6, c = bits.Sub64(p6, k2, c)
+	p7, _ = bits.Sub64(p7, k3, c)
+	return Int256{p4, p5, p6, p7}, Uint256{r0, r1, r2, r3}
+}
+
+// Mul128 returns x * y, it panics on overflow
+func (x Int256) Mul128(y Int128) Int256 {
+	r, c := x.Mul128o(y)
+	if c {
+		panic("fat.Int256.Mul128: overflow")
+	}
+	return r
+}
+
+// Mul128o returns Mul128u and whether x * y overflowed
+func (x Int256) Mul128o(y Int128) (r Int256, overflow bool) {
+	// two's complement product, no abs: x * y as unsigned = p0..p5
+	// x * y.L0
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	h2, p2 := bits.Mul64(x.L2, y.L0)
+	h3, p3 := bits.Mul64(x.L3, y.L0)
+	p1, c := bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, c = bits.Add64(p3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// x * y.L1, one limb up
+	g0, q1 := bits.Mul64(x.L0, y.L1)
+	g1, q2 := bits.Mul64(x.L1, y.L1)
+	g2, q3 := bits.Mul64(x.L2, y.L1)
+	g3, q4 := bits.Mul64(x.L3, y.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, c = bits.Add64(q3, g1, c)
+	q4, c = bits.Add64(q4, g2, c)
+	q5, _ := bits.Add64(g3, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, c := bits.Add64(p3, q3, c)
+	p4, c = bits.Add64(p4, q4, c)
+	p5, _ := bits.Add64(q5, 0, c)
+	// signed = unsigned - 2^128*x if y < 0 - 2^256*y if x < 0
+	my := -(y.L1 >> 63)
+	mx := uint64(int64(x.L3) >> 63)
+	r2, c = bits.Sub64(r2, x.L0&my, 0)
+	r3, c = bits.Sub64(r3, x.L1&my, c)
+	p4, c = bits.Sub64(p4, x.L2&my, c)
+	p5, _ = bits.Sub64(p5, x.L3&my, c)
+	p4, c = bits.Sub64(p4, y.L0&mx, 0)
+	p5, _ = bits.Sub64(p5, y.L1&mx, c)
+	// fits if limbs 4 and 5 only extend the sign of r3
+	s := uint64(int64(r3) >> 63)
+	return Int256{r0, r1, r2, r3}, (p4^s)|(p5^s) != 0
+}
+
+// Mul128u returns x * y wrapped around as on a Go integer
+func (x Int256) Mul128u(y Int128) Int256 {
+	// the unsigned product written out: a nested call costs more than the copy
+	// top limbs take carries by ADC, a plain + costs a CSET and an ADD more
+	// x * y.L0
+	h0, r0 := bits.Mul64(x.L0, y.L0)
+	h1, a1 := bits.Mul64(x.L1, y.L0)
+	h2, a2 := bits.Mul64(x.L2, y.L0)
+	a1, c := bits.Add64(a1, h0, 0)
+	a2, c = bits.Add64(a2, h1, c)
+	a3, _ := bits.Add64(x.L3*y.L0, h2, c)
+	// x * y.L1, one limb up
+	g0, b1 := bits.Mul64(x.L0, y.L1)
+	g1, b2 := bits.Mul64(x.L1, y.L1)
+	b2, c = bits.Add64(b2, g0, 0)
+	b3, _ := bits.Add64(x.L2*y.L1, g1, c)
+	r1, c := bits.Add64(a1, b1, 0)
+	r2, c := bits.Add64(a2, b2, c)
+	r3, _ := bits.Add64(a3, b3, c)
+	// a negative y adds -2^128 * x
+	m := -(y.L1 >> 63)
+	r2, c = bits.Sub64(r2, x.L0&m, 0)
+	r3, _ = bits.Sub64(r3, x.L1&m, c)
+	return Int256{r0, r1, r2, r3}
+}
+
+// Mul64 returns x * y, it panics on overflow
+func (x Int256) Mul64(y int64) Int256 {
+	r, c := x.Mul64o(y)
+	if c {
+		panic("fat.Int256.Mul64: overflow")
+	}
+	return r
+}
+
+// Mul64o returns Mul64u and whether x * y overflowed
+func (x Int256) Mul64o(y int64) (r Int256, overflow bool) {
+	// two's complement product, no abs: x * y as unsigned = r0..r3, p4
+	v := uint64(y)
+	h0, r0 := bits.Mul64(x.L0, v)
+	h1, r1 := bits.Mul64(x.L1, v)
+	h2, r2 := bits.Mul64(x.L2, v)
+	h3, r3 := bits.Mul64(x.L3, v)
+	r1, c := bits.Add64(r1, h0, 0)
+	r2, c = bits.Add64(r2, h1, c)
+	r3, c = bits.Add64(r3, h2, c)
+	p4, _ := bits.Add64(h3, 0, c)
+	// signed = unsigned - 2^64*x if y < 0 - 2^256*y if x < 0
+	my := uint64(y >> 63)
+	r1, c = bits.Sub64(r1, x.L0&my, 0)
+	r2, c = bits.Sub64(r2, x.L1&my, c)
+	r3, c = bits.Sub64(r3, x.L2&my, c)
+	p4, _ = bits.Sub64(p4, x.L3&my, c)
+	p4 -= v & uint64(int64(x.L3)>>63)
+	// fits if limb 4 only extends the sign of r3
+	return Int256{r0, r1, r2, r3}, p4 != uint64(int64(r3)>>63)
+}
+
+// Mul64u returns x * y wrapped around as on a Go integer
+func (x Int256) Mul64u(y int64) Int256 {
+	// the unsigned product is unrolled here, limbs stay in locals
+	v := uint64(y)
+	h0, r0 := bits.Mul64(x.L0, v)
+	h1, r1 := bits.Mul64(x.L1, v)
+	h2, r2 := bits.Mul64(x.L2, v)
+	r1, c := bits.Add64(r1, h0, 0)
+	r2, c = bits.Add64(r2, h1, c)
+	r3, _ := bits.Add64(x.L3*v, h2, c)
+	// a negative y adds -2^64 * x
+	m := uint64(y >> 63)
+	r1, c = bits.Sub64(r1, x.L0&m, 0)
+	r2, c = bits.Sub64(r2, x.L1&m, c)
+	r3, _ = bits.Sub64(r3, x.L2&m, c)
+	return Int256{r0, r1, r2, r3}
+}

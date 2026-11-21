@@ -595,3 +595,109 @@ func (x Int128) Sub64u(y int64) Int128 {
 	x.L1, _ = bits.Sub64(x.L1, ext, carry)
 	return x
 }
+
+// --- mul ------------------------------------------------
+
+// Mul returns x * y, it panics on overflow
+func (x Int128) Mul(y Int128) Int128 {
+	r, c := x.Mulo(y)
+	if c {
+		panic("fat.Int128.Mul: overflow")
+	}
+	return r
+}
+
+// Mulo returns Mulu and whether x * y overflowed
+func (x Int128) Mulo(y Int128) (r Int128, overflow bool) {
+	// the product with no abs: x * y as unsigned is p0..p3.
+	// A 4th product costs less than |x|, |y| and the negation
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, p1 := bits.Mul64(x.L1, y.L0)
+	g0, q1 := bits.Mul64(x.L0, y.L1)
+	g1, q2 := bits.Mul64(x.L1, y.L1)
+	p1, c := bits.Add64(p1, h0, 0)
+	p2, _ := bits.Add64(h1, 0, c)
+	q2, c = bits.Add64(q2, g0, 0)
+	p3, _ := bits.Add64(g1, 0, c)
+	r1, c := bits.Add64(p1, q1, 0)
+	p2, c = bits.Add64(p2, q2, c)
+	p3, _ = bits.Add64(p3, 0, c)
+	// signed = unsigned - 2^128*x if y < 0 - 2^128*y if x < 0
+	my := uint64(int64(y.L1) >> 63)
+	mx := uint64(int64(x.L1) >> 63)
+	p2, b := bits.Sub64(p2, x.L0&my, 0)
+	p3, _ = bits.Sub64(p3, x.L1&my, b)
+	p2, b = bits.Sub64(p2, y.L0&mx, 0)
+	p3, _ = bits.Sub64(p3, y.L1&mx, b)
+	// fits if limbs 2 and 3 only extend the sign of r1
+	s := uint64(int64(r1) >> 63)
+	return Int128{p0, r1}, (p2^s)|(p3^s) != 0
+}
+
+// Mulu returns x * y wrapped around as on a Go integer
+func (x Int128) Mulu(y Int128) Int128 {
+	return Int128(Uint128(x).Mulu(Uint128(y)))
+}
+
+// Mule returns the 256-bit product x * y
+func (x Int128) Mule(y Int128) Int256 {
+	// Uint128.Mule written out, faster than its call in our benchmarks
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, l1 := bits.Mul64(x.L1, y.L0)
+	h2, l2 := bits.Mul64(x.L0, y.L1)
+	h3, l3 := bits.Mul64(x.L1, y.L1)
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c := bits.Add64(h1, l3, c)
+	p3 := h3 + c
+	p1, c = bits.Add64(p1, l2, 0)
+	p2, c = bits.Add64(p2, h2, c)
+	p3 += c
+	// signed = unsigned - 2^128*y if x < 0 - 2^128*x if y < 0,
+	// the corrections summed off the path of the product
+	mx := uint64(int64(x.L1) >> 63)
+	my := uint64(int64(y.L1) >> 63)
+	k0, c := bits.Add64(y.L0&mx, x.L0&my, 0)
+	k1, _ := bits.Add64(y.L1&mx, x.L1&my, c)
+	p2, c = bits.Sub64(p2, k0, 0)
+	p3, _ = bits.Sub64(p3, k1, c)
+	return Int256{p0, p1, p2, p3}
+}
+
+// Mul64 returns x * y, it panics on overflow
+func (x Int128) Mul64(y int64) Int128 {
+	// x0 * y and x1 * y as unsigned, then signed high limbs by masks
+	h0, r0 := bits.Mul64(x.L0, uint64(y))
+	h1, r1 := bits.Mul64(x.L1, uint64(y))
+	// signed high limb of x0 * y, it fits 64 bits
+	h0 -= x.L0 & uint64(y>>63)
+	// a signed h0 adds its sign to limb 2
+	r1, c := bits.Add64(r1, h0, 0)
+	// fits if limb 2, h1 + c - sign(h0) - corrections, extends the sign of r1.
+	// One expression, so it inlines
+	if h1+c+r1>>63 != h0>>63+x.L1&uint64(y>>63)+uint64(y)&-(x.L1>>63) {
+		panic("fat.Int128.Mul64: overflow")
+	}
+	return Int128{r0, r1}
+}
+
+// Mul64o returns Mul64u and whether x * y overflowed
+func (x Int128) Mul64o(y int64) (r Int128, overflow bool) {
+	// x0 * y and x1 * y as unsigned, then signed high limbs by masks
+	h0, r0 := bits.Mul64(x.L0, uint64(y))
+	h1, r1 := bits.Mul64(x.L1, uint64(y))
+	// signed high limb of x0 * y, it fits 64 bits
+	h0 -= x.L0 & uint64(y>>63)
+	// a signed h0 adds its sign to limb 2
+	r1, c := bits.Add64(r1, h0, 0)
+	// fits if limb 2, h1 + c - sign(h0) - corrections, extends the sign of r1.
+	// One expression, so it inlines
+	return Int128{r0, r1}, h1+c+r1>>63 != h0>>63+x.L1&uint64(y>>63)+uint64(y)&-(x.L1>>63)
+}
+
+// Mul64u returns x * y wrapped around as on a Go integer
+func (x Int128) Mul64u(y int64) Int128 {
+	r := Uint128(x).Mul64u(uint64(y))
+	// a negative y adds -2^64 * x
+	r.L1 -= x.L0 & uint64(y>>63)
+	return Int128(r)
+}
