@@ -133,7 +133,7 @@ func TestUint256DivMod64(t *testing.T) {
 		xb, yb := RefU256(x), new(big.Int).SetUint64(y)
 		t := On(t, xb, yb)
 		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-		q, r := x.divMod64(y)
+		q, r := x.DivMod64(y)
 		require.Big(t, qb, RefU256(q))
 		require.Equal(t, rb.Uint64(), r)
 		require.Equal(t, q, x.Div64(y))
@@ -151,6 +151,7 @@ func TestUint256DivMod64(t *testing.T) {
 	}
 	require.Equal(t, "fat.Uint256.Div64: division by zero", PanicValue(func() { MaxUint256().Div64(0) }))
 	require.Equal(t, "fat.Uint256.Mod64: division by zero", PanicValue(func() { MaxUint256().Mod64(0) }))
+	require.Equal(t, "fat.Uint256.DivMod64: division by zero", PanicValue(func() { MaxUint256().DivMod64(0) }))
 }
 
 // TestUint256DivMod checks Div, Mod, DivMod and the 128-bit forms with big.Int
@@ -163,35 +164,28 @@ func TestUint256DivMod(t *testing.T) {
 			yl := Uint128{y.L0, y.L1}
 			yb := RefU128(yl)
 			qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-			q, r := x.Div128(yl), x.Mod128(yl)
+			q, r := x.DivMod128(yl)
 			require.Big(On(t, yb), qb, RefU256(q))
 			require.Big(On(t, yb), rb, RefU128(r))
+			require.Equal(t, q, x.Div128(yl))
+			require.Equal(t, r, x.Mod128(yl))
 		}
 		if y.IsZero() {
 			return
 		}
 		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-		q, r := x.Div(y), x.Mod(y)
+		q, r := x.DivMod(y)
 		require.Big(t, qb, RefU256(q))
 		require.Big(t, rb, RefU256(r))
+		require.Equal(t, q, x.Div(y))
+		require.Equal(t, r, x.Mod(y))
 	})
-	// pairs that reach the rare steps of divMod and divModKnuth
-	for _, p := range [][2]Uint256{
-		{{1, 0, 0xffffffffffffffff, 0x7fffffffffffffff}, {0xffff6e2fe55af23f, 0xfffeeba594cd7866, 1 << 63, 0}},
-		{{0x8ac7230489e80001, 0, 0, 1 << 63}, {0xffffffffffffffff, 3, 0, 2}},
-		{{0x7fffffffffffffff, 0x7fffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff}, {0x367ad, 1 << 63, 1, 0}},
-		{{0xb5beefe0eb38258c, 0xfffffc6ab012f493, 0xffffffffffffffff, 0x835b5184ab21060a}, {0x6b6a30956420c16, 1, 0, 0}},
-	} {
-		x, y := p[0], p[1]
-		xb, yb := RefU256(x), RefU256(y)
-		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-		require.Big(On(t, xb, yb), qb, RefU256(x.Div(y)))
-		require.Big(On(t, xb, yb), rb, RefU256(x.Mod(y)))
-	}
 	require.Equal(t, "fat.Uint256.Div: division by zero", PanicValue(func() { MaxUint256().Div(Uint256{}) }))
 	require.Equal(t, "fat.Uint256.Mod: division by zero", PanicValue(func() { MaxUint256().Mod(Uint256{}) }))
+	require.Equal(t, "fat.Uint256.DivMod: division by zero", PanicValue(func() { MaxUint256().DivMod(Uint256{}) }))
 	require.Equal(t, "fat.Uint256.Div128: division by zero", PanicValue(func() { MaxUint256().Div128(Uint128{}) }))
 	require.Equal(t, "fat.Uint256.Mod128: division by zero", PanicValue(func() { MaxUint256().Mod128(Uint128{}) }))
+	require.Equal(t, "fat.Uint256.DivMod128: division by zero", PanicValue(func() { MaxUint256().DivMod128(Uint128{}) }))
 }
 
 // TestReciprocal2by1 checks reciprocal2by1 against bits.Div64
@@ -282,11 +276,125 @@ func TestUint256DivModKnuth(t *testing.T) {
 		x := Uint256{0, top.L0, top.L1, top.L2}
 		xb, yb := RefU256(x), RefU256(y)
 		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-		q, m := x.Div(y), x.Mod(y)
+		q, m := x.DivMod(y)
 		require.Big(On(t, xb, yb), qb, RefU256(q))
 		require.Big(On(t, xb, yb), rb, RefU256(m))
 		// the same steps in the Int256 kernels
 		checkInt256DivSigns(t)(x, y)
+	}
+}
+
+// TestUint256MulDiv checks MulDiv in all forms, MulDivCeil, MulMod, AddMod and SubMod with big.Int.
+// AddMod also gets sums at m and 2m and sums that carry past 2^256
+func TestUint256MulDiv(t *testing.T) {
+	t.Parallel()
+	var ds []Uint256
+	Values256(func(d Uint256) {
+		if !d.IsZero() {
+			ds = append(ds, d)
+		}
+	})
+	i := 0
+	Pairs256(func(x, y Uint256) {
+		i++
+		xb, yb := RefU256(x), RefU256(y)
+		pb := new(big.Int).Mul(xb, yb)
+		for _, d := range []Uint256{ds[i%len(ds)], ds[(i*7+3)%len(ds)], y, x} {
+			if d.IsZero() {
+				continue
+			}
+			db := RefU256(d)
+			t := On(t, xb, yb, db)
+			qb, rb := new(big.Int).QuoRem(pb, db, new(big.Int))
+			over := !BigFits(qb, 256, false)
+			q, o := x.MulDivo(y, d)
+			require.Big(t, WrapU256(qb), RefU256(q))
+			require.Equal(t, over, o)
+			require.Equal(t, q, x.MulDivu(y, d))
+			if over {
+				require.Equal(t, "fat.Uint256.MulDiv: overflow", PanicValue(func() { x.MulDiv(y, d) }))
+				require.Equal(t, "fat.Uint256.MulDivMod: overflow", PanicValue(func() { x.MulDivMod(y, d) }))
+			} else {
+				require.Big(t, qb, RefU256(x.MulDiv(y, d)))
+				q, r := x.MulDivMod(y, d)
+				require.Big(t, qb, RefU256(q))
+				require.Big(t, rb, RefU256(r))
+				// MulDiv is Mul then Div where Mul does not overflow
+				if p, o := x.Mulo(y); !o {
+					require.Equal(t, p.Div(d), q)
+				}
+			}
+			require.Big(t, new(big.Int).Mod(pb, db), RefU256(x.MulMod(y, d)))
+			require.Big(t, new(big.Int).Mod(new(big.Int).Add(xb, yb), db), RefU256(x.AddMod(y, d)))
+			require.Big(t, new(big.Int).Mod(new(big.Int).Sub(xb, yb), db), RefU256(x.SubMod(y, d)))
+			// MulDivCeil is the quotient plus one where x * y / d has a positive fraction
+			cb := new(big.Int).Set(qb)
+			if rb.Sign() != 0 && rb.Sign() == db.Sign() {
+				cb.Add(cb, Big1)
+			}
+			if BigFits(cb, 256, false) {
+				require.Big(t, cb, RefU256(x.MulDivCeil(y, d)))
+			} else {
+				require.Equal(t, "fat.Uint256.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+			}
+		}
+	})
+	// sums near m and 2m, with operands below m or a carried sum
+	for _, m := range ds {
+		for _, x := range []Uint256{{}, m.Rsh(1), m.Sub64(1), m, MaxUint256()} {
+			for _, sum := range []Uint256{m.Sub64u(1), m, m.Add64u(1), m.Addu(m).Sub64u(1), m.Addu(m), m.Addu(m).Add64u(1)} {
+				y := sum.Subu(x)
+				want := new(big.Int).Mod(new(big.Int).Add(RefU256(x), RefU256(y)), RefU256(m))
+				require.Big(On(t, x, y, m), want, RefU256(x.AddMod(y, m)))
+			}
+		}
+	}
+	// a carried sum by small moduli, 1 included
+	for _, m := range []Uint256{NewUint256(1), NewUint256(2), NewUint256(3), MaxUint256(), MaxUint256().Sub64(1)} {
+		for _, x := range []Uint256{MaxUint256(), MaxUint256().Sub64(1), MaxUint256().Rsh(1).Add64(1)} {
+			want := new(big.Int).Mod(new(big.Int).Add(RefU256(x), RefU256(MaxUint256())), RefU256(m))
+			require.Big(On(t, x, m), want, RefU256(x.AddMod(MaxUint256(), m)))
+		}
+	}
+	// a carried sum 2^256 + s with the top limbs of a 193-bit modulus
+	// makes the digit 2^64-1 in knuthStep4
+	for _, m := range []Uint256{{3, 5, 7, 1}, {4, 1 << 63, MaxUint256().L0, 1}} {
+		y := Uint256{10, m.L0 - 1, m.L1, m.L2}
+		want := new(big.Int).Mod(new(big.Int).Add(RefU256(MaxUint256()), RefU256(y)), RefU256(m))
+		require.Big(On(t, y, m), want, RefU256(MaxUint256().AddMod(y, m)))
+	}
+	// differences at -2m, -m, 0, m and 2m and one off, with operands below m or not
+	for _, m := range ds {
+		for _, x := range []Uint256{{}, m.Rsh(1), m.Sub64u(1), m, MaxUint256()} {
+			for _, k := range []Uint256{{}, m, m.Addu(m)} {
+				for _, y := range []Uint256{x.Subu(k), x.Subu(k).Add64u(1), x.Subu(k).Sub64u(1), x.Addu(k), x.Addu(k).Add64u(1), x.Addu(k).Sub64u(1)} {
+					want := new(big.Int).Mod(new(big.Int).Sub(RefU256(x), RefU256(y)), RefU256(m))
+					require.Big(On(t, x, y, m), want, RefU256(x.SubMod(y, m)))
+				}
+			}
+		}
+	}
+	// (2^129 - 1)(2^129 + 1) / 4 is the maximum and 3/4: it fits truncated, not rounded up
+	{
+		h := NewUint256(1).Lsh(129)
+		x, y, d := h.Sub64(1), h.Add64(1), NewUint256(4)
+		require.Equal(t, MaxUint256(), x.MulDiv(y, d))
+		require.Equal(t, "fat.Uint256.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+	}
+	// a product past 256 bits and one within them take different paths to d
+	for _, x := range []Uint256{MaxUint256(), {L0: 3}} {
+		for name, fn := range map[string]func(){
+			"MulDiv":     func() { x.MulDiv(x, Uint256{}) },
+			"MulDivo":    func() { x.MulDivo(x, Uint256{}) },
+			"MulDivu":    func() { x.MulDivu(x, Uint256{}) },
+			"MulDivMod":  func() { x.MulDivMod(x, Uint256{}) },
+			"MulDivCeil": func() { x.MulDivCeil(x, Uint256{}) },
+			"AddMod":     func() { x.AddMod(x, Uint256{}) },
+			"SubMod":     func() { x.SubMod(x, Uint256{}) },
+			"MulMod":     func() { x.MulMod(x, Uint256{}) },
+		} {
+			require.Equal(On(t, x, name), "fat.Uint256."+name+": division by zero", PanicValue(fn))
+		}
 	}
 }
 
@@ -496,6 +604,18 @@ func BenchmarkUint256(b *testing.B) {
 			sinkU256 = x[i&BenchMask].Mul64u(y[i&BenchMask])
 		}
 	})
+	b.Run("op=DivMod", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256, sink2U256 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod/fit", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkU256, sink2U256 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
 	b.Run("op=Div", func(b *testing.B) {
 		x, y := in.u256, in.v256
 		for i := range b.N {
@@ -520,6 +640,56 @@ func BenchmarkUint256(b *testing.B) {
 			sinkU256 = x[i&BenchMask].Mod(y[i&BenchMask])
 		}
 	})
+	b.Run("op=DivMod128", func(b *testing.B) {
+		x, y := in.u256, in.u128
+		for i := range b.N {
+			sinkU256, sinkU128 = x[i&BenchMask].DivMod128(y[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivo", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256, SinkBool = x[i&BenchMask].MulDivo(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	// |d| >= |y| keeps x * y / d within range: y with its low bit set away from zero
+	mulDivD := sync.OnceValue(func() []Uint256 {
+		d := make([]Uint256, len(in.v256))
+		for i, v := range in.v256 {
+			d[i] = v.Or(NewUint256(1))
+		}
+		return d
+	})
+	b.Run("op=MulDiv", func(b *testing.B) {
+		x, y, d := in.u256, in.v256, mulDivD()
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].MulDiv(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivCeil", func(b *testing.B) {
+		x, y, d := in.u256, in.v256, mulDivD()
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].MulDivCeil(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulMod", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].MulMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=AddMod", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].AddMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=SubMod", func(b *testing.B) {
+		x, y := in.u256, in.v256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].SubMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
 	b.Run("op=Div64", func(b *testing.B) {
 		x, y := in.u256, in.u64
 		for i := range b.N {
@@ -530,6 +700,12 @@ func BenchmarkUint256(b *testing.B) {
 		x, y := in.u256, in.u64
 		for i := range b.N {
 			SinkUint64 = x[i&BenchMask].Mod64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod64", func(b *testing.B) {
+		x, y := in.u256, in.u64
+		for i := range b.N {
+			sinkU256, SinkUint64 = x[i&BenchMask].DivMod64(y[i&BenchMask])
 		}
 	})
 	b.Run("op=Lsh", func(b *testing.B) {

@@ -183,6 +183,72 @@ func BenchmarkInt128(b *testing.B) {
 			sinkI128 = x[i&BenchMask].Mul64(y[i&BenchMask])
 		}
 	})
+	b.Run("op=DivMod", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128, sink2I128 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod/fit", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkI128, sink2I128 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod64", func(b *testing.B) {
+		x, y := in.i128, in.i64
+		for i := range b.N {
+			sinkI128, SinkInt64 = x[i&BenchMask].DivMod64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivo", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128, SinkBool = x[i&BenchMask].MulDivo(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	// |d| >= |y| keeps x * y / d within range: y with its low bit set away from zero
+	mulDivD := sync.OnceValue(func() []Int128 {
+		d := make([]Int128, len(in.j128))
+		for i, v := range in.j128 {
+			if v.IsNegative() {
+				d[i] = v.AndNot(NewInt128(1))
+			} else {
+				d[i] = v.Or(NewInt128(1))
+			}
+		}
+		return d
+	})
+	b.Run("op=MulDiv", func(b *testing.B) {
+		x, y, d := in.i128, in.j128, mulDivD()
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].MulDiv(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivCeil", func(b *testing.B) {
+		x, y, d := in.i128, in.j128, mulDivD()
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].MulDivCeil(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulMod", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].MulMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=AddMod", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].AddMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=SubMod", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].SubMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
 	b.Run("op=Mul64o", func(b *testing.B) {
 		x, y := in.i128, in.i64
 		for i := range b.N {
@@ -321,9 +387,9 @@ var kI128 = Kind[Int128]{
 func TestInt128DivMod(t *testing.T) {
 	t.Parallel()
 	// check compares one division form with big.Int, q and r truncated.
-	// Div panics where Divo reports an overflow
+	// Div and DivMod panic where Divo reports an overflow
 	check := func(t testing.TB, name string, xb, yb *big.Int, div func() Int128, divo func() (Int128, bool), divu func() Int128,
-		mod func() *big.Int) {
+		mod func() *big.Int, divmod func() (Int128, *big.Int)) {
 		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
 		over := !BigFits(qb, 128, true)
 		wrap := WrapI128(qb)
@@ -334,21 +400,27 @@ func TestInt128DivMod(t *testing.T) {
 		require.Big(t, rb, mod())
 		if over {
 			require.Equal(t, "fat.Int128."+name+": overflow", PanicValue(func() { div() }))
+			require.Equal(t, "fat.Int128.DivMod"+name[3:]+": overflow", PanicValue(func() { divmod() }))
 			return
 		}
 		require.Big(t, qb, RefI128(div()))
+		q, r := divmod()
+		require.Big(t, qb, RefI128(q))
+		require.Big(t, rb, r)
 	}
 	check64 := func(x Int128, v int64) {
 		xb, vb := RefI128(x), big.NewInt(v)
 		check(On(t, xb, vb), "Div64", xb, vb, func() Int128 { return x.Div64(v) }, func() (Int128, bool) { return x.Div64o(v) },
-			func() Int128 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) })
+			func() Int128 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) },
+			func() (Int128, *big.Int) { q, r := x.DivMod64(v); return q, big.NewInt(r) })
 	}
 	pair := func(x, y Int128) {
 		xb := RefI128(x)
 		if !y.IsZero() {
 			yb := RefI128(y)
 			check(On(t, xb, yb), "Div", xb, yb, func() Int128 { return x.Div(y) }, func() (Int128, bool) { return x.Divo(y) },
-				func() Int128 { return x.Divu(y) }, func() *big.Int { return RefI128(x.Mod(y)) })
+				func() Int128 { return x.Divu(y) }, func() *big.Int { return RefI128(x.Mod(y)) },
+				func() (Int128, *big.Int) { q, r := x.DivMod(y); return q, RefI128(r) })
 		}
 		if v := int64(y.L0); v != 0 {
 			check64(x, v)
@@ -379,14 +451,16 @@ func TestInt128DivMod(t *testing.T) {
 	require.Equal(t, MinInt128(), MinInt128().Div64u(-1))
 	require.Equal(t, int64(0), MinInt128().Mod64(-1))
 	for name, fn := range map[string]func(){
-		"Div":    func() { MaxInt128().Div(Int128{}) },
-		"Divo":   func() { MaxInt128().Divo(Int128{}) },
-		"Divu":   func() { MaxInt128().Divu(Int128{}) },
-		"Mod":    func() { MaxInt128().Mod(Int128{}) },
-		"Div64":  func() { MaxInt128().Div64(0) },
-		"Div64o": func() { MaxInt128().Div64o(0) },
-		"Div64u": func() { MaxInt128().Div64u(0) },
-		"Mod64":  func() { MaxInt128().Mod64(0) },
+		"Div":      func() { MaxInt128().Div(Int128{}) },
+		"Divo":     func() { MaxInt128().Divo(Int128{}) },
+		"Divu":     func() { MaxInt128().Divu(Int128{}) },
+		"Mod":      func() { MaxInt128().Mod(Int128{}) },
+		"DivMod":   func() { MaxInt128().DivMod(Int128{}) },
+		"Div64":    func() { MaxInt128().Div64(0) },
+		"Div64o":   func() { MaxInt128().Div64o(0) },
+		"Div64u":   func() { MaxInt128().Div64u(0) },
+		"Mod64":    func() { MaxInt128().Mod64(0) },
+		"DivMod64": func() { MaxInt128().DivMod64(0) },
 	} {
 		require.Equal(On(t, name), "fat.Int128."+name+": division by zero", PanicValue(fn))
 	}
@@ -395,6 +469,119 @@ func TestInt128DivMod(t *testing.T) {
 		t := On(t, x)
 		require.Equal(t, "fat.Int128.Div: division by zero", PanicValue(func() { x.Div(Int128{}) }))
 		require.Equal(t, "fat.Int128.Divo: division by zero", PanicValue(func() { x.Divo(Int128{}) }))
+		require.Equal(t, "fat.Int128.DivMod: division by zero", PanicValue(func() { x.DivMod(Int128{}) }))
+	}
+}
+
+// TestInt128MulDiv checks MulDiv, MulDivCeil, MulMod, AddMod and SubMod with big.Int and by zero
+func TestInt128MulDiv(t *testing.T) {
+	t.Parallel()
+	var ds []Int128
+	Values128(func(d Int128) {
+		if !d.IsZero() {
+			ds = append(ds, d)
+		}
+	})
+	i := 0
+	Pairs128(func(x, y Int128) {
+		i++
+		xb, yb := RefI128(x), RefI128(y)
+		pb := new(big.Int).Mul(xb, yb)
+		for _, d := range []Int128{ds[i%len(ds)], ds[(i*7+3)%len(ds)], y, x} {
+			if d.IsZero() {
+				continue
+			}
+			db := RefI128(d)
+			t := On(t, xb, yb, db)
+			qb, rb := new(big.Int).QuoRem(pb, db, new(big.Int))
+			over := !BigFits(qb, 128, true)
+			q, o := x.MulDivo(y, d)
+			require.Big(t, WrapI128(qb), RefI128(q))
+			require.Equal(t, over, o)
+			require.Equal(t, q, x.MulDivu(y, d))
+			if over {
+				require.Equal(t, "fat.Int128.MulDiv: overflow", PanicValue(func() { x.MulDiv(y, d) }))
+				require.Equal(t, "fat.Int128.MulDivMod: overflow", PanicValue(func() { x.MulDivMod(y, d) }))
+			} else {
+				require.Big(t, qb, RefI128(x.MulDiv(y, d)))
+				q, r := x.MulDivMod(y, d)
+				require.Big(t, qb, RefI128(q))
+				require.Big(t, rb, RefI128(r))
+				// MulDiv is Mul then Div where Mul does not overflow
+				if p, o := x.Mulo(y); !o {
+					require.Equal(t, p.Div(d), q)
+				}
+			}
+			// the sign of the dividend as Go's %
+			require.Big(t, new(big.Int).Rem(pb, db), RefI128(x.MulMod(y, d)))
+			require.Big(t, new(big.Int).Rem(new(big.Int).Add(xb, yb), db), RefI128(x.AddMod(y, d)))
+			require.Big(t, new(big.Int).Rem(new(big.Int).Sub(xb, yb), db), RefI128(x.SubMod(y, d)))
+			// MulDivCeil is the quotient plus one where x * y / d has a positive fraction
+			cb := new(big.Int).Set(qb)
+			if rb.Sign() != 0 && rb.Sign() == db.Sign() {
+				cb.Add(cb, Big1)
+			}
+			if BigFits(cb, 128, true) {
+				require.Big(t, cb, RefI128(x.MulDivCeil(y, d)))
+			} else {
+				require.Equal(t, "fat.Int128.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+			}
+		}
+	})
+	// an overflowing sum of one sign by small, negative and extreme moduli
+	for _, m := range []Int128{NewInt128(1), NewInt128(-1), NewInt128(3), NewInt128(-3), MaxInt128(), MinInt128()} {
+		for _, x := range []Int128{MaxInt128(), MaxInt128().Sub64(1), MinInt128(), MinInt128().Add64(1)} {
+			want := new(big.Int).Rem(new(big.Int).Add(RefI128(x), RefI128(x)), RefI128(m))
+			require.Big(On(t, x, m), want, RefI128(x.AddMod(x, m)))
+		}
+	}
+	// sums at the borders of the division paths, with and without an overflow
+	divPairs128(func(a, b Uint128) {
+		x, m := Int128(a), Int128(b)
+		if m.IsZero() {
+			return
+		}
+		for _, y := range []Int128{x, x.Not(), m, MinInt128(), MaxInt128()} {
+			want := new(big.Int).Rem(new(big.Int).Add(RefI128(x), RefI128(y)), RefI128(m))
+			require.Big(On(t, x, y, m), want, RefI128(x.AddMod(y, m)))
+		}
+	})
+	// differences at -2m, -m, 0, m and 2m and one off, with operands below m or not
+	for _, m := range ds {
+		for _, x := range []Int128{{}, m.Rsh(1), m, m.Not(), MaxInt128(), MinInt128()} {
+			for _, k := range []Int128{{}, m, m.Addu(m)} {
+				for _, y := range []Int128{x.Subu(k), x.Subu(k).Add64u(1), x.Subu(k).Sub64u(1), x.Addu(k), x.Addu(k).Add64u(1), x.Addu(k).Sub64u(1)} {
+					want := new(big.Int).Rem(new(big.Int).Sub(RefI128(x), RefI128(y)), RefI128(m))
+					require.Big(On(t, x, y, m), want, RefI128(x.SubMod(y, m)))
+				}
+			}
+		}
+	}
+	// (2^65 - 1)(2^65 + 1) / 8 is the maximum and 7/8: it fits truncated, not rounded up.
+	// Negated it rounds up to -maximum
+	{
+		h := NewInt128(1).Lsh(65)
+		x, y, d := h.Sub64(1), h.Add64(1), NewInt128(8)
+		require.Equal(t, MaxInt128(), x.MulDiv(y, d))
+		require.Equal(t, "fat.Int128.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+		require.Equal(t, "fat.Int128.MulDivCeil: overflow", PanicValue(func() { x.Neg().MulDivCeil(y, d.Neg()) }))
+		require.Equal(t, MaxInt128().Neg(), x.Neg().MulDivCeil(y, d))
+		require.Equal(t, MaxInt128().Neg(), x.MulDivCeil(y, d.Neg()))
+	}
+	// a product past 128 bits and one within them take different paths to d
+	for _, x := range []Int128{MaxInt128(), NewInt128(-3)} {
+		for name, fn := range map[string]func(){
+			"MulDiv":     func() { x.MulDiv(x, Int128{}) },
+			"MulDivo":    func() { x.MulDivo(x, Int128{}) },
+			"MulDivu":    func() { x.MulDivu(x, Int128{}) },
+			"MulDivMod":  func() { x.MulDivMod(x, Int128{}) },
+			"MulDivCeil": func() { x.MulDivCeil(x, Int128{}) },
+			"AddMod":     func() { x.AddMod(x, Int128{}) },
+			"SubMod":     func() { x.SubMod(x, Int128{}) },
+			"MulMod":     func() { x.MulMod(x, Int128{}) },
+		} {
+			require.Equal(On(t, x, name), "fat.Int128."+name+": division by zero", PanicValue(fn))
+		}
 	}
 }
 

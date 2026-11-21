@@ -311,6 +311,78 @@ func BenchmarkInt256(b *testing.B) {
 			sinkI256 = x[i&BenchMask].Mul64(y[i&BenchMask])
 		}
 	})
+	b.Run("op=DivMod", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256, sink2I256 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod/fit", func(b *testing.B) {
+		x, y := in.fx, in.fy
+		for i := range b.N {
+			sinkI256, sink2I256 = x[i&BenchMask].DivMod(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod64", func(b *testing.B) {
+		x, y := in.i256, in.i64
+		for i := range b.N {
+			sinkI256, SinkInt64 = x[i&BenchMask].DivMod64(y[i&BenchMask])
+		}
+	})
+	b.Run("op=DivMod128", func(b *testing.B) {
+		x, y := in.i256, in.i128
+		for i := range b.N {
+			sinkI256, sinkI128 = x[i&BenchMask].DivMod128(y[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivo", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256, SinkBool = x[i&BenchMask].MulDivo(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	// |d| >= |y| keeps x * y / d within range: y with its low bit set away from zero
+	mulDivD := sync.OnceValue(func() []Int256 {
+		d := make([]Int256, len(in.j256))
+		for i, v := range in.j256 {
+			if v.IsNegative() {
+				d[i] = v.AndNot(NewInt256(1))
+			} else {
+				d[i] = v.Or(NewInt256(1))
+			}
+		}
+		return d
+	})
+	b.Run("op=MulDiv", func(b *testing.B) {
+		x, y, d := in.i256, in.j256, mulDivD()
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].MulDiv(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulDivCeil", func(b *testing.B) {
+		x, y, d := in.i256, in.j256, mulDivD()
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].MulDivCeil(y[i&BenchMask], d[i&BenchMask])
+		}
+	})
+	b.Run("op=MulMod", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].MulMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=AddMod", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].AddMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
+	b.Run("op=SubMod", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].SubMod(y[i&BenchMask], y[(i+1)&BenchMask])
+		}
+	})
 	b.Run("op=Mul64o", func(b *testing.B) {
 		x, y := in.i256, in.i64
 		for i := range b.N {
@@ -436,7 +508,7 @@ var kI256 = Kind[Int256]{
 	},
 }
 
-// checkInt256DivSigns checks Div and Mod of +-x by +-y with big.Int.
+// checkInt256DivSigns checks Div, Mod and DivMod of +-x by +-y with big.Int.
 // It skips a zero y and magnitudes of 2^255 and more
 func checkInt256DivSigns(t *testing.T) func(x, y Uint256) {
 	return func(x, y Uint256) {
@@ -448,9 +520,11 @@ func checkInt256DivSigns(t *testing.T) func(x, y Uint256) {
 			xb, yb := RefI256(xi), RefI256(yi)
 			t := On(t, xb, yb)
 			qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
-			q, r := xi.Div(yi), xi.Mod(yi)
+			q, r := xi.DivMod(yi)
 			require.Big(t, qb, RefI256(q))
 			require.Big(t, rb, RefI256(r))
+			require.Equal(t, q, xi.Div(yi))
+			require.Equal(t, r, xi.Mod(yi))
 		}
 	}
 }
@@ -461,7 +535,7 @@ func TestInt256DivMod(t *testing.T) {
 	t.Parallel()
 	// check compares one division form with big.Int, the overflow included
 	check := func(t testing.TB, name string, xb, yb *big.Int, div func() Int256, divo func() (Int256, bool), divu func() Int256,
-		mod func() *big.Int) {
+		mod func() *big.Int, divmod func() (Int256, *big.Int)) {
 		qb, rb := new(big.Int).QuoRem(xb, yb, new(big.Int))
 		over := !BigFits(qb, 256, true)
 		wrap := WrapI256(qb)
@@ -472,21 +546,27 @@ func TestInt256DivMod(t *testing.T) {
 		require.Big(t, rb, mod())
 		if over {
 			require.Equal(t, "fat.Int256."+name+": overflow", PanicValue(func() { div() }))
+			require.Equal(t, "fat.Int256.DivMod"+name[3:]+": overflow", PanicValue(func() { divmod() }))
 			return
 		}
 		require.Big(t, qb, RefI256(div()))
+		q, r := divmod()
+		require.Big(t, qb, RefI256(q))
+		require.Big(t, rb, r)
 	}
 	check64 := func(x Int256, v int64) {
 		xb, vb := RefI256(x), big.NewInt(v)
 		check(On(t, xb, vb), "Div64", xb, vb, func() Int256 { return x.Div64(v) }, func() (Int256, bool) { return x.Div64o(v) },
-			func() Int256 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) })
+			func() Int256 { return x.Div64u(v) }, func() *big.Int { return big.NewInt(x.Mod64(v)) },
+			func() (Int256, *big.Int) { q, r := x.DivMod64(v); return q, big.NewInt(r) })
 	}
 	Pairs256(func(x, y Int256) {
 		xb := RefI256(x)
 		if !y.IsZero() {
 			yb := RefI256(y)
 			check(On(t, xb, yb), "Div", xb, yb, func() Int256 { return x.Div(y) }, func() (Int256, bool) { return x.Divo(y) },
-				func() Int256 { return x.Divu(y) }, func() *big.Int { return RefI256(x.Mod(y)) })
+				func() Int256 { return x.Divu(y) }, func() *big.Int { return RefI256(x.Mod(y)) },
+				func() (Int256, *big.Int) { q, r := x.DivMod(y); return q, RefI256(r) })
 		}
 		if v := int64(y.L0); v != 0 {
 			check64(x, v)
@@ -494,7 +574,8 @@ func TestInt256DivMod(t *testing.T) {
 		if v := (Int128{y.L0, y.L1}); !v.IsZero() {
 			vb := RefI128(v)
 			check(On(t, xb, vb), "Div128", xb, vb, func() Int256 { return x.Div128(v) }, func() (Int256, bool) { return x.Div128o(v) },
-				func() Int256 { return x.Div128u(v) }, func() *big.Int { return RefI128(x.Mod128(v)) })
+				func() Int256 { return x.Div128u(v) }, func() *big.Int { return RefI128(x.Mod128(v)) },
+				func() (Int256, *big.Int) { q, r := x.DivMod128(v); return q, RefI128(r) })
 		}
 	})
 	// every step of the reciprocal with a divisor of either sign:
@@ -526,20 +607,139 @@ func TestInt256DivMod(t *testing.T) {
 	require.Equal(t, MinInt256(), MinInt256().Div64u(-1))
 	require.Equal(t, int64(0), MinInt256().Mod64(-1))
 	for name, fn := range map[string]func(){
-		"Div":     func() { MaxInt256().Div(Int256{}) },
-		"Divo":    func() { MaxInt256().Divo(Int256{}) },
-		"Divu":    func() { MaxInt256().Divu(Int256{}) },
-		"Mod":     func() { MaxInt256().Mod(Int256{}) },
-		"Div64":   func() { MaxInt256().Div64(0) },
-		"Div64o":  func() { MaxInt256().Div64o(0) },
-		"Div64u":  func() { MaxInt256().Div64u(0) },
-		"Mod64":   func() { MaxInt256().Mod64(0) },
-		"Div128":  func() { MaxInt256().Div128(Int128{}) },
-		"Div128o": func() { MaxInt256().Div128o(Int128{}) },
-		"Div128u": func() { MaxInt256().Div128u(Int128{}) },
-		"Mod128":  func() { MaxInt256().Mod128(Int128{}) },
+		"Div":       func() { MaxInt256().Div(Int256{}) },
+		"Divo":      func() { MaxInt256().Divo(Int256{}) },
+		"Divu":      func() { MaxInt256().Divu(Int256{}) },
+		"Mod":       func() { MaxInt256().Mod(Int256{}) },
+		"DivMod":    func() { MaxInt256().DivMod(Int256{}) },
+		"Div64":     func() { MaxInt256().Div64(0) },
+		"Div64o":    func() { MaxInt256().Div64o(0) },
+		"Div64u":    func() { MaxInt256().Div64u(0) },
+		"Mod64":     func() { MaxInt256().Mod64(0) },
+		"DivMod64":  func() { MaxInt256().DivMod64(0) },
+		"Div128":    func() { MaxInt256().Div128(Int128{}) },
+		"Div128o":   func() { MaxInt256().Div128o(Int128{}) },
+		"Div128u":   func() { MaxInt256().Div128u(Int128{}) },
+		"Mod128":    func() { MaxInt256().Mod128(Int128{}) },
+		"DivMod128": func() { MaxInt256().DivMod128(Int128{}) },
 	} {
 		require.Equal(On(t, name), "fat.Int256."+name+": division by zero", PanicValue(fn))
+	}
+}
+
+// TestInt256MulDiv checks MulDiv in all forms, MulDivCeil, MulMod, AddMod and SubMod with big.Int.
+// AddMod also gets sums at m and 2m and sums that overflow
+func TestInt256MulDiv(t *testing.T) {
+	t.Parallel()
+	var ds []Int256
+	Values256(func(d Int256) {
+		if !d.IsZero() {
+			ds = append(ds, d)
+		}
+	})
+	i := 0
+	Pairs256(func(x, y Int256) {
+		i++
+		xb, yb := RefI256(x), RefI256(y)
+		pb := new(big.Int).Mul(xb, yb)
+		for _, d := range []Int256{ds[i%len(ds)], ds[(i*7+3)%len(ds)], y, x} {
+			if d.IsZero() {
+				continue
+			}
+			db := RefI256(d)
+			t := On(t, xb, yb, db)
+			qb, rb := new(big.Int).QuoRem(pb, db, new(big.Int))
+			over := !BigFits(qb, 256, true)
+			q, o := x.MulDivo(y, d)
+			require.Big(t, WrapI256(qb), RefI256(q))
+			require.Equal(t, over, o)
+			require.Equal(t, q, x.MulDivu(y, d))
+			if over {
+				require.Equal(t, "fat.Int256.MulDiv: overflow", PanicValue(func() { x.MulDiv(y, d) }))
+				require.Equal(t, "fat.Int256.MulDivMod: overflow", PanicValue(func() { x.MulDivMod(y, d) }))
+			} else {
+				require.Big(t, qb, RefI256(x.MulDiv(y, d)))
+				q, r := x.MulDivMod(y, d)
+				require.Big(t, qb, RefI256(q))
+				require.Big(t, rb, RefI256(r))
+				// MulDiv is Mul then Div where Mul does not overflow
+				if p, o := x.Mulo(y); !o {
+					require.Equal(t, p.Div(d), q)
+				}
+			}
+			// the sign of the dividend as Go's %
+			require.Big(t, new(big.Int).Rem(pb, db), RefI256(x.MulMod(y, d)))
+			require.Big(t, new(big.Int).Rem(new(big.Int).Add(xb, yb), db), RefI256(x.AddMod(y, d)))
+			require.Big(t, new(big.Int).Rem(new(big.Int).Sub(xb, yb), db), RefI256(x.SubMod(y, d)))
+			// MulDivCeil is the quotient plus one where x * y / d has a positive fraction
+			cb := new(big.Int).Set(qb)
+			if rb.Sign() != 0 && rb.Sign() == db.Sign() {
+				cb.Add(cb, Big1)
+			}
+			if BigFits(cb, 256, true) {
+				require.Big(t, cb, RefI256(x.MulDivCeil(y, d)))
+			} else {
+				require.Equal(t, "fat.Int256.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+			}
+		}
+	})
+	// sums at m and 2m of either sign need no division
+	Values256(func(m Int256) {
+		if m.IsZero() {
+			return
+		}
+		for _, x := range []Int256{{}, m.Rsh(1), m, m.Not(), MaxInt256(), MinInt256()} {
+			for _, sum := range []Int256{m.Sub64u(1), m, m.Add64u(1), m.Addu(m).Sub64u(1), m.Addu(m), m.Addu(m).Add64u(1)} {
+				for _, y := range []Int256{sum.Subu(x), Int256{}.Subu(sum).Subu(x)} {
+					want := new(big.Int).Rem(new(big.Int).Add(RefI256(x), RefI256(y)), RefI256(m))
+					require.Big(On(t, x, y, m), want, RefI256(x.AddMod(y, m)))
+				}
+			}
+		}
+	})
+	// an overflowing sum of one sign by small, negative and extreme moduli
+	for _, m := range []Int256{NewInt256(1), NewInt256(-1), NewInt256(3), NewInt256(-3), MaxInt256(), MinInt256()} {
+		for _, x := range []Int256{MaxInt256(), MaxInt256().Sub64(1), MinInt256(), MinInt256().Add64(1)} {
+			want := new(big.Int).Rem(new(big.Int).Add(RefI256(x), RefI256(x)), RefI256(m))
+			require.Big(On(t, x, m), want, RefI256(x.AddMod(x, m)))
+		}
+	}
+	// differences at -2m, -m, 0, m and 2m and one off, with operands below m or not
+	for _, m := range ds {
+		for _, x := range []Int256{{}, m.Rsh(1), m, m.Not(), MaxInt256(), MinInt256()} {
+			for _, k := range []Int256{{}, m, m.Addu(m)} {
+				for _, y := range []Int256{x.Subu(k), x.Subu(k).Add64u(1), x.Subu(k).Sub64u(1), x.Addu(k), x.Addu(k).Add64u(1), x.Addu(k).Sub64u(1)} {
+					want := new(big.Int).Rem(new(big.Int).Sub(RefI256(x), RefI256(y)), RefI256(m))
+					require.Big(On(t, x, y, m), want, RefI256(x.SubMod(y, m)))
+				}
+			}
+		}
+	}
+	// (2^129 - 1)(2^129 + 1) / 8 is the maximum and 7/8: it fits truncated, not rounded up.
+	// Negated it rounds up to -maximum
+	{
+		h := NewInt256(1).Lsh(129)
+		x, y, d := h.Sub64(1), h.Add64(1), NewInt256(8)
+		require.Equal(t, MaxInt256(), x.MulDiv(y, d))
+		require.Equal(t, "fat.Int256.MulDivCeil: overflow", PanicValue(func() { x.MulDivCeil(y, d) }))
+		require.Equal(t, "fat.Int256.MulDivCeil: overflow", PanicValue(func() { x.Neg().MulDivCeil(y, d.Neg()) }))
+		require.Equal(t, MaxInt256().Neg(), x.Neg().MulDivCeil(y, d))
+		require.Equal(t, MaxInt256().Neg(), x.MulDivCeil(y, d.Neg()))
+	}
+	// a product past 256 bits and one within them take different paths to d
+	for _, x := range []Int256{MaxInt256(), NewInt256(-3)} {
+		for name, fn := range map[string]func(){
+			"MulDiv":     func() { x.MulDiv(x, Int256{}) },
+			"MulDivo":    func() { x.MulDivo(x, Int256{}) },
+			"MulDivu":    func() { x.MulDivu(x, Int256{}) },
+			"MulDivMod":  func() { x.MulDivMod(x, Int256{}) },
+			"MulDivCeil": func() { x.MulDivCeil(x, Int256{}) },
+			"AddMod":     func() { x.AddMod(x, Int256{}) },
+			"SubMod":     func() { x.SubMod(x, Int256{}) },
+			"MulMod":     func() { x.MulMod(x, Int256{}) },
+		} {
+			require.Equal(On(t, x, name), "fat.Int256."+name+": division by zero", PanicValue(fn))
+		}
 	}
 }
 

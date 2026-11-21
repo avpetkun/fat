@@ -13,6 +13,10 @@ var (
 		1: "fat.Int128.Div: overflow",
 		2: "fat.Int128.Div: division by zero",
 	}
+	int128DivModPanics = [3]string{
+		1: "fat.Int128.DivMod: overflow",
+		2: "fat.Int128.DivMod: division by zero",
+	}
 )
 
 // Div returns x / y truncated toward zero.
@@ -49,6 +53,183 @@ func (x Int128) Mod(y Int128) Int128 {
 		panic("fat.Int128.Mod: division by zero")
 	}
 	return x.mod(y)
+}
+
+// DivMod returns Div and Mod.
+// It panics for y == 0 and on overflow at MinInt128 / -1
+func (x Int128) DivMod(y Int128) (q, r Int128) {
+	var st uint
+	if q, r, st = x.divMod(y); st != 0 {
+		panic(int128DivModPanics[st])
+	}
+	return
+}
+
+// divMod is DivMod with a status for its panics: 1 on overflow, 2 for y == 0.
+// The quotient wraps on overflow, q and r are not defined for y == 0.
+// It is Uint128.divMod on |x| and |y| written out, see the comments there.
+// It calls nothing and so needs no stack frame
+func (x Int128) divMod(y Int128) (q, r Int128, st uint) {
+	if arch.IsAmd64 {
+		// a hardware 128-by-64 division per quotient limb there
+		if y.L0|y.L1 == 0 {
+			return q, r, 2
+		}
+		// |x| and |y| by (v ^ m) - m with the sign masks
+		mx, my := uint64(int64(x.L1)>>63), uint64(int64(y.L1)>>63)
+		var u, w Uint128
+		var c uint64
+		u.L0, c = bits.Sub64(x.L0^mx, mx, 0)
+		u.L1, _ = bits.Sub64(x.L1^mx, mx, c)
+		w.L0, c = bits.Sub64(y.L0^my, my, 0)
+		w.L1, _ = bits.Sub64(y.L1^my, my, c)
+		var q0, q1, r0, r1 uint64
+		if w.L1 == 0 {
+			// the top limb is divided only when not below the divisor
+			t := u.L1
+			if t >= w.L0 {
+				q1 = t / w.L0
+				t -= q1 * w.L0
+			}
+			q0, r0 = bits.Div64(t, u.L0, w.L0)
+		} else {
+			n := uint(bits.LeadingZeros64(w.L1))
+			d := w.L1<<(n&63) | w.L0>>1>>(^n&63)
+			k, _ := bits.Div64(u.L1>>1, u.L1<<63|u.L0>>1, d)
+			k >>= ^n & 63
+			if k != 0 {
+				k--
+			}
+			hi, lo := bits.Mul64(w.L0, k)
+			var b uint64
+			r0, b = bits.Sub64(u.L0, lo, 0)
+			r1, _ = bits.Sub64(u.L1, hi+w.L1*k, b)
+			t0, b := bits.Sub64(r0, w.L0, 0)
+			t1, b := bits.Sub64(r1, w.L1, b)
+			if b == 0 {
+				r0 = t0
+			}
+			if b == 0 {
+				r1 = t1
+			}
+			q0 = k + 1 - b
+		}
+		// q is negative when the signs differ, r takes the sign of x
+		mq := mx ^ my
+		q.L0, c = bits.Sub64(q0^mq, mq, 0)
+		q.L1, _ = bits.Sub64(q1^mq, mq, c)
+		r.L0, c = bits.Sub64(r0^mx, mx, 0)
+		r.L1, _ = bits.Sub64(r1^mx, mx, c)
+		// |q| = 2^127 fits only as a negative quotient
+		st = uint(q1 &^ mq >> 63)
+		return
+	}
+	// |x| and |y| by (v ^ m) - m with the sign masks.
+	// Two UnsignedAbs inlined here would leave a branch on the sign of y
+	mx, my := uint64(int64(x.L1)>>63), uint64(int64(y.L1)>>63)
+	var u, w Uint128
+	var c uint64
+	u.L0, c = bits.Sub64(x.L0^mx, mx, 0)
+	u.L1, _ = bits.Sub64(x.L1^mx, mx, c)
+	w.L0, c = bits.Sub64(y.L0^my, my, 0)
+	w.L1, _ = bits.Sub64(y.L1^my, my, c)
+	var q0, q1, r0, r1 uint64
+	um, wm := u.L1, w.L1
+	if um > 1<<33-1 {
+		um = 1<<33 - 1
+	}
+	if wm == 0 {
+		wm = 1
+	}
+	if um < wm {
+		n, d := u.L1>>1, w.L1>>1+1
+		z := u.L1 | w.L1
+		if z == 0 {
+			n = u.L0
+		}
+		if z == 0 {
+			d = w.L0
+		}
+		// d == 0 only for y == 0, any quotient does then
+		k := n
+		if d != 0 {
+			k = n / d
+		}
+		hi, lo := bits.Mul64(k, w.L0)
+		hi += k * w.L1
+		var b uint64
+		r0, b = bits.Sub64(u.L0, lo, 0)
+		r1, _ = bits.Sub64(u.L1, hi, b)
+		t0, b := bits.Sub64(r0, w.L0, 0)
+		t1, b := bits.Sub64(r1, w.L1, b)
+		if b == 0 {
+			r0 = t0
+		}
+		if b == 0 {
+			r1 = t1
+		}
+		if b == 0 {
+			k++
+		}
+		q0 = k
+	} else if w.L1 == 0 && w.L0 != 0 {
+		w := w.L0
+		q1 = u.L1 / w
+		t := u.L1 - q1*w
+		s := uint(bits.LeadingZeros64(w))
+		d := w << (s & 63)
+		v := (1<<47 - 1) / (d>>40 + 1)
+		d0 := d & 1
+		e := (v>>1)&-d0 - v*(d>>1+d0)
+		hi, _ := bits.Mul64(e, e)
+		e += hi >> 22
+		hi, _ = bits.Mul64(v<<19, e)
+		v = v<<41 + hi
+		hi, lo := bits.Mul64(v, d)
+		_, c := bits.Add64(lo, d, 0)
+		hi, _ = bits.Add64(hi, d, c)
+		v -= hi
+		q0, r0 = div2by1(t<<(s&63)|u.L0>>1>>(^s&63), u.L0<<(s&63), d, v)
+		r0 >>= s & 63
+	} else {
+		n := uint(bits.LeadingZeros64(w.L1))
+		d := w.L1<<(n&63) | w.L0>>1>>(^n&63)
+		v := (1<<47 - 1) / (d>>40 + 1)
+		d0 := d & 1
+		e := (v>>1)&-d0 - v*(d>>1+d0)
+		hi, _ := bits.Mul64(e, e)
+		e += hi >> 22
+		hi, _ = bits.Mul64(v<<19, e)
+		v = v<<41 + hi
+		hi, lo := bits.Mul64(v, d)
+		_, c := bits.Add64(lo, d, 0)
+		hi, _ = bits.Add64(hi, d, c)
+		v -= hi
+		k, _ := div2by1(u.L1>>1, u.L1<<63|u.L0>>1, d, v)
+		k >>= ^n & 63
+		if k != 0 {
+			k--
+		}
+		hi, lo = bits.Mul64(w.L0, k)
+		t := u.Subu(Uint128{lo, hi + w.L1*k})
+		if !t.LessThan(w) {
+			k++
+			t = t.Subu(w)
+		}
+		q0, r0, r1 = k, t.L0, t.L1
+	}
+	// q is negative when the signs differ, r takes the sign of x
+	mq := mx ^ my
+	q.L0, c = bits.Sub64(q0^mq, mq, 0)
+	q.L1, _ = bits.Sub64(q1^mq, mq, c)
+	r.L0, c = bits.Sub64(r0^mx, mx, 0)
+	r.L1, _ = bits.Sub64(r1^mx, mx, c)
+	// |q| = 2^127 fits only as a negative quotient
+	st = uint(q1 &^ mq >> 63)
+	if y.L0|y.L1 == 0 {
+		st = 2
+	}
+	return
 }
 
 // divo is the quotient of divMod with its status
@@ -351,6 +532,89 @@ func (x Int128) Mod64(y int64) int64 {
 	return x.mod64(y)
 }
 
+// DivMod64 returns Div64 and Mod64.
+// It panics for y == 0 and on overflow at MinInt128 / -1
+func (x Int128) DivMod64(y int64) (Int128, int64) {
+	if y == 0 {
+		panic("fat.Int128.DivMod64: division by zero")
+	}
+	return x.divMod64(y, "fat.Int128.DivMod64: overflow")
+}
+
+// divMod64 is DivMod64 for y != 0 only, y == 0 panics with a runtime error.
+// It panics with overflow at MinInt128 / -1
+func (x Int128) divMod64(y int64, overflow string) (q Int128, rem int64) {
+	if arch.IsAmd64 {
+		// a hardware 128-by-64 division per quotient limb there
+		mx, my := uint64(int64(x.L1)>>63), uint64(y>>63)
+		u := x.UnsignedAbs()
+		w := uint64(y) ^ my - my
+		var q1 uint64
+		t := u.L1
+		if t >= w {
+			q1 = t / w
+			t -= q1 * w
+		}
+		q0, ra := bits.Div64(t, u.L0, w)
+		// the quotient is negative when the signs differ: (v ^ m) - m
+		mq := mx ^ my
+		var c uint64
+		q.L0, c = bits.Add64(q0^mq, mq&1, 0)
+		q.L1, _ = bits.Add64(q1^mq, 0, c)
+		// |q| = 2^127 fits only as a negative quotient
+		if int64(q1&^mq) < 0 {
+			panic(overflow)
+		}
+		// the remainder takes the sign of x
+		return q, int64(ra ^ mx - mx)
+	}
+	// Uint128.divMod64 on |x| and |y| written out, faster than the call.
+	// The reciprocal from a 24-bit seed, its last step beside the product:
+	// both faster on Graviton in our benchmarks
+	my := uint64(y >> 63)
+	u := x.UnsignedAbs()
+	w := uint64(y) ^ my - my
+	s := uint(bits.LeadingZeros64(w))
+	d := w << (s & 63)
+	v := (1<<47 - 1) / (d>>40 + 1)
+	q1 := u.L1 / w
+	ra := u.L1 - q1*w
+	d0 := d & 1
+	e := (v>>1)&-d0 - v*(d>>1+d0)
+	hi, _ := bits.Mul64(e, e)
+	e += hi >> 22
+	hi, _ = bits.Mul64(v<<19, e)
+	v = v<<41 + hi
+	hi, lo := bits.Mul64(v, d)
+	_, c := bits.Add64(lo, d, 0)
+	t, _ := bits.Add64(hi, d, c)
+	uh, ul := ra<<(s&63)|u.L0>>1>>(^s&63), u.L0<<(s&63)
+	qh, ql := bits.Mul64(v, uh)
+	ql, c = bits.Add64(ql, ul, 0)
+	qh, _ = bits.Add64(qh, uh, c)
+	ql, c = bits.Add64(ql, uh&t, 0)
+	qh, _ = bits.Add64(qh, 0, c)
+	r := ul - d - qh*d
+	q0 := qh + 1
+	if r > ql {
+		q0 = qh
+		r += d
+	}
+	if r >= d {
+		q0++
+	}
+	// the quotient is negative when the signs differ: (v ^ m) - m
+	mq := uint64(int64(x.L1)>>63) ^ my
+	q.L0, c = bits.Add64(q0^mq, mq&1, 0)
+	q.L1, _ = bits.Add64(q1^mq, 0, c)
+	// |q| = 2^127 fits only as a negative quotient
+	if int64(q1&^mq) < 0 {
+		panic(overflow)
+	}
+	// x = q*y + r in the low limb
+	return q, int64(x.L0 - q.L0*uint64(y))
+}
+
 // div64 is divMod64 without the remainder and its multiply ending the chain.
 // For y != 0 only, y == 0 panics with a runtime error
 func (x Int128) div64(y int64, overflow string) (q Int128) {
@@ -536,4 +800,178 @@ func (x Int128) mod64(y int64) int64 {
 	}
 	// x = q*y + r in the low limb, q*y has the sign of x
 	return int64(x.L0 - q0*(w^mx-mx))
+}
+
+// int128MulDivPanics, int128MulDivModPanics and int128MulDivCeilPanics are the panics by kernel status.
+// One panic from a table keeps the wrappers within the inline budget
+var (
+	int128MulDivPanics = [3]string{
+		1: "fat.Int128.MulDiv: overflow",
+		2: "fat.Int128.MulDiv: division by zero",
+	}
+	int128MulDivModPanics = [3]string{
+		1: "fat.Int128.MulDivMod: overflow",
+		2: "fat.Int128.MulDivMod: division by zero",
+	}
+	int128MulDivCeilPanics = [3]string{
+		1: "fat.Int128.MulDivCeil: overflow",
+		2: "fat.Int128.MulDivCeil: division by zero",
+	}
+)
+
+// MulDiv returns x * y / d truncated toward zero, the product in 256 bits.
+// It panics for d == 0 and when the quotient overflows
+func (x Int128) MulDiv(y, d Int128) (q Int128) {
+	q, _, st := x.mulDivMod(y, d)
+	if st != 0 {
+		panic(int128MulDivPanics[st])
+	}
+	return
+}
+
+// MulDivo returns MulDivu and whether the quotient overflowed.
+// It panics for d == 0
+func (x Int128) MulDivo(y, d Int128) (q Int128, overflow bool) {
+	q, _, st := x.mulDivMod(y, d)
+	if st > 1 {
+		panic("fat.Int128.MulDivo: division by zero")
+	}
+	return q, st != 0
+}
+
+// MulDivu returns x * y / d wrapped around, the product in 256 bits.
+// It panics for d == 0
+func (x Int128) MulDivu(y, d Int128) (q Int128) {
+	q, _, st := x.mulDivMod(y, d)
+	if st > 1 {
+		panic("fat.Int128.MulDivu: division by zero")
+	}
+	return
+}
+
+// MulDivMod returns MulDiv and x * y % d with the sign of x * y.
+// It panics for d == 0 and when the quotient overflows
+func (x Int128) MulDivMod(y, d Int128) (q, r Int128) {
+	q, r, st := x.mulDivMod(y, d)
+	if st != 0 {
+		panic(int128MulDivModPanics[st])
+	}
+	return
+}
+
+// MulDivCeil returns x * y / d rounded toward +Inf, the product in 256 bits.
+// It panics for d == 0 and when the quotient overflows
+func (x Int128) MulDivCeil(y, d Int128) Int128 {
+	q, st := x.mulDivCeil(y, d)
+	if st != 0 {
+		panic(int128MulDivCeilPanics[st])
+	}
+	return q
+}
+
+// mulDivMod is MulDivMod with the low bits of q and a status:
+// 1 when q overflowed, 2 for d == 0
+func (x Int128) mulDivMod(y, d Int128) (q, r Int128, st uint) {
+	qa, ra, st := x.UnsignedAbs().mulDivMod(y.UnsignedAbs(), d.UnsignedAbs())
+	// q takes the sign of x * y / d and r that of x * y, by (v ^ m) - m
+	mr := uint64(int64(x.L1^y.L1) >> 63)
+	mq := mr ^ uint64(int64(d.L1)>>63)
+	var b uint64
+	q.L0, b = bits.Sub64(qa.L0^mq, mq, 0)
+	q.L1, _ = bits.Sub64(qa.L1^mq, mq, b)
+	r.L0, b = bits.Sub64(ra.L0^mr, mr, 0)
+	r.L1, _ = bits.Sub64(ra.L1^mr, mr, b)
+	// a nonzero q that fits keeps its sign, and 2^127 fits only as a negative.
+	// The unsigned status carries over: a zero d leaves q = 0 and f = 0
+	_, f := bits.Sub64(0, qa.L0|qa.L1, 0)
+	f &= (q.L1 ^ mq) >> 63
+	return q, r, st | uint(f)
+}
+
+// mulDivCeil is MulDivCeil with the low bits of q and a status as of mulDivMod
+func (x Int128) mulDivCeil(y, d Int128) (q Int128, st uint) {
+	qa, ra, st := x.UnsignedAbs().mulDivMod(y.UnsignedAbs(), d.UnsignedAbs())
+	// truncation has rounded a negative quotient up already,
+	// a positive one with a remainder adds one
+	mq := uint64(int64(x.L1^y.L1^d.L1) >> 63)
+	nz := ra.L0 | ra.L1
+	var c uint64
+	qa.L0, c = bits.Add64(qa.L0, (nz|-nz)>>63&^mq, 0)
+	qa.L1, _ = bits.Add64(qa.L1, 0, c)
+	// the sign by (v ^ m) - m and the overflow test as in mulDivMod.
+	// A carry out of qa comes only from an overflowed q
+	var b uint64
+	q.L0, b = bits.Sub64(qa.L0^mq, mq, 0)
+	q.L1, _ = bits.Sub64(qa.L1^mq, mq, b)
+	_, f := bits.Sub64(0, qa.L0|qa.L1, 0)
+	f &= (q.L1 ^ mq) >> 63
+	return q, st | uint(f)
+}
+
+// AddMod returns (x + y) % m of the exact sum, with the sign of the sum.
+// It panics for m == 0
+func (x Int128) AddMod(y, m Int128) Int128 {
+	if m.L0|m.L1 == 0 {
+		panic("fat.Int128.AddMod: division by zero")
+	}
+	// the 129-bit sum as its sign and |x + y|.
+	// An overflow flips the sign of the wrapped sum
+	s0, c := bits.Add64(x.L0, y.L0, 0)
+	s1, _ := bits.Add64(x.L1, y.L1, c)
+	ov := (x.L1 ^ s1) & (y.L1 ^ s1)
+	ms := uint64(int64(s1^ov) >> 63)
+	a0, c := bits.Sub64(s0^ms, ms, 0)
+	a1, _ := bits.Sub64(s1^ms, ms, c)
+	mm := uint64(int64(m.L1) >> 63)
+	w0, c := bits.Sub64(m.L0^mm, mm, 0)
+	w1, _ := bits.Sub64(m.L1^mm, mm, c)
+	// only MinInt128 + MinInt128 = -2^128 is past 128 bits.
+	// 2^128 - |m| leaves the same remainder
+	if a0|a1|^ov>>63 == 0 {
+		a0, c = bits.Sub64(0, w0, 0)
+		a1, _ = bits.Sub64(0, w1, c)
+	}
+	r := Uint128{a0, a1}.mod(Uint128{w0, w1})
+	// the sign of the sum by (v ^ m) - m
+	r0, c := bits.Sub64(r.L0^ms, ms, 0)
+	r1, _ := bits.Sub64(r.L1^ms, ms, c)
+	return Int128{r0, r1}
+}
+
+// SubMod returns (x - y) % m of the exact difference, with the sign of the
+// difference. It panics for m == 0
+func (x Int128) SubMod(y, m Int128) Int128 {
+	if m.L0|m.L1 == 0 {
+		panic("fat.Int128.SubMod: division by zero")
+	}
+	// the 129-bit difference as its sign and |x - y|, which fits 128 bits.
+	// An overflow flips the sign of the wrapped difference
+	s0, c := bits.Sub64(x.L0, y.L0, 0)
+	s1, _ := bits.Sub64(x.L1, y.L1, c)
+	ov := (x.L1 ^ y.L1) & (x.L1 ^ s1)
+	ms := uint64(int64(s1^ov) >> 63)
+	a0, c := bits.Sub64(s0^ms, ms, 0)
+	a1, _ := bits.Sub64(s1^ms, ms, c)
+	mm := uint64(int64(m.L1) >> 63)
+	w0, c := bits.Sub64(m.L0^mm, mm, 0)
+	w1, _ := bits.Sub64(m.L1^mm, mm, c)
+	r := Uint128{a0, a1}.mod(Uint128{w0, w1})
+	// the sign of the difference by (v ^ m) - m
+	r0, c := bits.Sub64(r.L0^ms, ms, 0)
+	r1, _ := bits.Sub64(r.L1^ms, ms, c)
+	return Int128{r0, r1}
+}
+
+// MulMod returns x * y % m with the sign of x * y, the product in 256 bits.
+// It panics for m == 0
+func (x Int128) MulMod(y, m Int128) Int128 {
+	_, ra, st := x.UnsignedAbs().mulDivMod(y.UnsignedAbs(), m.UnsignedAbs())
+	if st > 1 {
+		panic("fat.Int128.MulMod: division by zero")
+	}
+	// the sign of x * y by (v ^ m) - m
+	mr := uint64(int64(x.L1^y.L1) >> 63)
+	r0, b := bits.Sub64(ra.L0^mr, mr, 0)
+	r1, _ := bits.Sub64(ra.L1^mr, mr, b)
+	return Int128{r0, r1}
 }

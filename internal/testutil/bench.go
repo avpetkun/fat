@@ -16,6 +16,7 @@ const BenchMask = 1<<18 - 1
 var (
 	SinkBool   bool
 	SinkInt    int
+	SinkInt64  int64
 	SinkUint   uint
 	SinkUint64 uint64
 	SinkBig    *big.Int

@@ -23,6 +23,14 @@ func (x Uint256) Mod64(y uint64) uint64 {
 	return x.mod64(y)
 }
 
+// DivMod64 returns x / y and x % y, it panics for y == 0
+func (x Uint256) DivMod64(y uint64) (Uint256, uint64) {
+	if y == 0 {
+		panic("fat.Uint256.DivMod64: division by zero")
+	}
+	return x.divMod64(y)
+}
+
 // divMod64 is DivMod64 for y != 0 only, y == 0 can panic or loop forever
 func (x Uint256) divMod64(y uint64) (Uint256, uint64) {
 	if arch.IsAmd64 {
@@ -242,6 +250,15 @@ func (x Uint256) Mod(y Uint256) Uint256 {
 	return r
 }
 
+// DivMod returns x / y and x % y, it panics for y == 0
+func (x Uint256) DivMod(y Uint256) (q, r Uint256) {
+	q, r, zero := x.divMod(y)
+	if zero {
+		panic("fat.Uint256.DivMod: division by zero")
+	}
+	return
+}
+
 // Div128 returns x / y, it panics for y == 0
 func (x Uint256) Div128(y Uint128) Uint256 {
 	q, _, zero := x.divMod128(y)
@@ -258,6 +275,15 @@ func (x Uint256) Mod128(y Uint128) Uint128 {
 		panic("fat.Uint256.Mod128: division by zero")
 	}
 	return r
+}
+
+// DivMod128 returns x / y and x % y, it panics for y == 0
+func (x Uint256) DivMod128(y Uint128) (q Uint256, r Uint128) {
+	q, r, zero := x.divMod128(y)
+	if zero {
+		panic("fat.Uint256.DivMod128: division by zero")
+	}
+	return
 }
 
 // divMod is DivMod and true for y == 0, with a zero quotient and remainder.
@@ -867,4 +893,537 @@ func (x Uint256) divModKnuth(y Uint256) (Uint256, Uint256) {
 		r1, _ = bits.Sub64(r1, e1, b)
 	}
 	return Uint256{q0, q1, qf, 0}, Uint256{r0>>s | r1<<1<<t, r1 >> s, 0, 0}
+}
+
+// uint256MulDivPanics, uint256MulDivModPanics and uint256MulDivCeilPanics are the panics by kernel status.
+// One panic from a table keeps the wrappers within the inline budget
+var (
+	uint256MulDivPanics = [3]string{
+		1: "fat.Uint256.MulDiv: overflow",
+		2: "fat.Uint256.MulDiv: division by zero",
+	}
+	uint256MulDivModPanics = [3]string{
+		1: "fat.Uint256.MulDivMod: overflow",
+		2: "fat.Uint256.MulDivMod: division by zero",
+	}
+	uint256MulDivCeilPanics = [3]string{
+		1: "fat.Uint256.MulDivCeil: overflow",
+		2: "fat.Uint256.MulDivCeil: division by zero",
+	}
+)
+
+// MulDiv returns x * y / d with the product in 512 bits.
+// It panics for d == 0 and when the quotient overflows
+func (x Uint256) MulDiv(y, d Uint256) (q Uint256) {
+	q, _, st := x.mulDivMod(y, d)
+	if st != 0 {
+		panic(uint256MulDivPanics[st])
+	}
+	return
+}
+
+// MulDivo returns MulDivu and whether the quotient overflowed.
+// It panics for d == 0
+func (x Uint256) MulDivo(y, d Uint256) (q Uint256, overflow bool) {
+	q, _, st := x.mulDivMod(y, d)
+	if st > 1 {
+		panic("fat.Uint256.MulDivo: division by zero")
+	}
+	return q, st != 0
+}
+
+// MulDivu returns x * y / d wrapped around, the product in 512 bits.
+// It panics for d == 0
+func (x Uint256) MulDivu(y, d Uint256) (q Uint256) {
+	q, _, st := x.mulDivMod(y, d)
+	if st > 1 {
+		panic("fat.Uint256.MulDivu: division by zero")
+	}
+	return
+}
+
+// MulDivMod returns MulDiv and x * y % d.
+// It panics for d == 0 and when the quotient overflows
+func (x Uint256) MulDivMod(y, d Uint256) (q, r Uint256) {
+	q, r, st := x.mulDivMod(y, d)
+	if st != 0 {
+		panic(uint256MulDivModPanics[st])
+	}
+	return
+}
+
+// MulDivCeil returns x * y / d rounded up, the product in 512 bits.
+// It panics for d == 0 and when the quotient overflows
+func (x Uint256) MulDivCeil(y, d Uint256) Uint256 {
+	q, st := x.mulDivCeil(y, d)
+	if st != 0 {
+		panic(uint256MulDivCeilPanics[st])
+	}
+	return q
+}
+
+// AddMod returns (x + y) % m of the exact sum, it panics for m == 0
+func (x Uint256) AddMod(y, m Uint256) Uint256 {
+	if m.IsZero() {
+		panic("fat.Uint256.AddMod: division by zero")
+	}
+	s0, c := bits.Add64(x.L0, y.L0, 0)
+	s1, c := bits.Add64(x.L1, y.L1, c)
+	s2, c := bits.Add64(x.L2, y.L2, c)
+	s3, c := bits.Add64(x.L3, y.L3, c)
+	// the 257-bit sum less m and less 2m:
+	// a sum below 2m is the common case, as of operands below m
+	t0, b := bits.Sub64(s0, m.L0, 0)
+	t1, b := bits.Sub64(s1, m.L1, b)
+	t2, b := bits.Sub64(s2, m.L2, b)
+	t3, b := bits.Sub64(s3, m.L3, b)
+	_, d := bits.Sub64(t0, m.L0, 0)
+	_, d = bits.Sub64(t1, m.L1, d)
+	_, d = bits.Sub64(t2, m.L2, d)
+	_, d = bits.Sub64(t3, m.L3, d)
+	// s < m with no carry, or s - m in 256 bits and below m
+	if b&^c|d&^(b^c) != 0 {
+		// picked without a branch, sums fall on both sides of m at random
+		if b > c {
+			t0, t1, t2, t3 = s0, s1, s2, s3
+		}
+		return Uint256{t0, t1, t2, t3}
+	}
+	if c == 0 {
+		// one division of the sum
+		_, r, _ := Uint256{s0, s1, s2, s3}.divMod(m)
+		return r
+	}
+	// rare unless the operands are full width:
+	// a carried sum takes both reduced, then it is below 2m
+	_, x, _ = x.divMod(m)
+	_, y, _ = y.divMod(m)
+	s0, c = bits.Add64(x.L0, y.L0, 0)
+	s1, c = bits.Add64(x.L1, y.L1, c)
+	s2, c = bits.Add64(x.L2, y.L2, c)
+	s3, c = bits.Add64(x.L3, y.L3, c)
+	t0, b = bits.Sub64(s0, m.L0, 0)
+	t1, b = bits.Sub64(s1, m.L1, b)
+	t2, b = bits.Sub64(s2, m.L2, b)
+	t3, b = bits.Sub64(s3, m.L3, b)
+	if b > c {
+		t0, t1, t2, t3 = s0, s1, s2, s3
+	}
+	return Uint256{t0, t1, t2, t3}
+}
+
+// SubMod returns (x - y) mod m of the exact difference, in [0, m) for x < y too.
+// It panics for m == 0
+func (x Uint256) SubMod(y, m Uint256) Uint256 {
+	if m.IsZero() {
+		panic("fat.Uint256.SubMod: division by zero")
+	}
+	d0, b := bits.Sub64(x.L0, y.L0, 0)
+	d1, b := bits.Sub64(x.L1, y.L1, b)
+	d2, b := bits.Sub64(x.L2, y.L2, b)
+	d3, b := bits.Sub64(x.L3, y.L3, b)
+	e0, c := bits.Add64(d0, m.L0, 0)
+	e1, c := bits.Add64(d1, m.L1, c)
+	e2, c := bits.Add64(d2, m.L2, c)
+	e3, c := bits.Add64(d3, m.L3, c)
+	_, t := bits.Sub64(d0, m.L0, 0)
+	_, t = bits.Sub64(d1, m.L1, t)
+	_, t = bits.Sub64(d2, m.L2, t)
+	_, t = bits.Sub64(d3, m.L3, t)
+	// operands below m are the common case: |x - y| < m takes x - y, or
+	// x - y + m for x < y, picked by conditional moves as the sign is a coin flip.
+	// The test is d < m without a borrow, y - x <= m by the carry of d + m with one
+	if t&^b|c&b != 0 {
+		if b != 0 {
+			d0, d1, d2, d3 = e0, e1, e2, e3
+		}
+		return Uint256{d0, d1, d2, d3}
+	}
+	if b == 0 {
+		_, r, _ := Uint256{d0, d1, d2, d3}.divMod(m)
+		return r
+	}
+	// m - (y - x) mod m, or 0 where m divides y - x
+	d0, b = bits.Sub64(0, d0, 0)
+	d1, b = bits.Sub64(0, d1, b)
+	d2, b = bits.Sub64(0, d2, b)
+	d3, _ = bits.Sub64(0, d3, b)
+	_, r, _ := Uint256{d0, d1, d2, d3}.divMod(m)
+	if r.IsZero() {
+		return r
+	}
+	return m.Subu(r)
+}
+
+// MulMod returns x * y % m with the product in 512 bits, it panics for m == 0
+func (x Uint256) MulMod(y, m Uint256) (r Uint256) {
+	_, r, st := x.mulDivMod(y, m)
+	if st > 1 {
+		panic("fat.Uint256.MulMod: division by zero")
+	}
+	return
+}
+
+// mulDivMod is MulDivMod with the low bits of the quotient and a status:
+// 1 when the quotient overflowed, 2 for d == 0
+func (x Uint256) mulDivMod(y, d Uint256) (q, r Uint256, st uint) {
+	// the 512-bit product p7..p0 row by row,
+	// each row a chain of the low and one of the high halves
+	h0, p0 := bits.Mul64(x.L0, y.L0)
+	h1, l1 := bits.Mul64(x.L0, y.L1)
+	h2, l2 := bits.Mul64(x.L0, y.L2)
+	h3, l3 := bits.Mul64(x.L0, y.L3)
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c := bits.Add64(h1, l2, c)
+	p3, c := bits.Add64(h2, l3, c)
+	p4 := h3 + c
+	h0, l0 := bits.Mul64(x.L1, y.L0)
+	h1, l1 = bits.Mul64(x.L1, y.L1)
+	h2, l2 = bits.Mul64(x.L1, y.L2)
+	h3, l3 = bits.Mul64(x.L1, y.L3)
+	p1, c = bits.Add64(p1, l0, 0)
+	p2, c = bits.Add64(p2, l1, c)
+	p3, c = bits.Add64(p3, l2, c)
+	p4, c = bits.Add64(p4, l3, c)
+	p5 := c
+	p2, c = bits.Add64(p2, h0, 0)
+	p3, c = bits.Add64(p3, h1, c)
+	p4, c = bits.Add64(p4, h2, c)
+	p5 += h3 + c
+	h0, l0 = bits.Mul64(x.L2, y.L0)
+	h1, l1 = bits.Mul64(x.L2, y.L1)
+	h2, l2 = bits.Mul64(x.L2, y.L2)
+	h3, l3 = bits.Mul64(x.L2, y.L3)
+	p2, c = bits.Add64(p2, l0, 0)
+	p3, c = bits.Add64(p3, l1, c)
+	p4, c = bits.Add64(p4, l2, c)
+	p5, c = bits.Add64(p5, l3, c)
+	p6 := c
+	p3, c = bits.Add64(p3, h0, 0)
+	p4, c = bits.Add64(p4, h1, c)
+	p5, c = bits.Add64(p5, h2, c)
+	p6 += h3 + c
+	h0, l0 = bits.Mul64(x.L3, y.L0)
+	h1, l1 = bits.Mul64(x.L3, y.L1)
+	h2, l2 = bits.Mul64(x.L3, y.L2)
+	h3, l3 = bits.Mul64(x.L3, y.L3)
+	p3, c = bits.Add64(p3, l0, 0)
+	p4, c = bits.Add64(p4, l1, c)
+	p5, c = bits.Add64(p5, l2, c)
+	p6, c = bits.Add64(p6, l3, c)
+	p7 := c
+	p4, c = bits.Add64(p4, h0, 0)
+	p5, c = bits.Add64(p5, h1, c)
+	p6, c = bits.Add64(p6, h2, c)
+	p7 += h3 + c
+	// a product within 256 bits
+	if p4|p5|p6|p7 == 0 {
+		q, r, zero := Uint256{p0, p1, p2, p3}.divMod(d)
+		if zero {
+			st = 2
+		}
+		return q, r, st
+	}
+	return div512o(Uint256{p4, p5, p6, p7}, Uint256{p0, p1, p2, p3}, d)
+}
+
+// mulDivCeil is MulDivCeil with the low 256 bits of q and a status as of mulDivMod
+func (x Uint256) mulDivCeil(y, d Uint256) (Uint256, uint) {
+	q, r, st := x.mulDivMod(y, d)
+	// a remainder adds one, which carries out only of an overflowed q
+	// or of the maximum. A zero d leaves r = 0
+	nz := r.L0 | r.L1 | r.L2 | r.L3
+	q0, c := bits.Add64(q.L0, (nz|-nz)>>63, 0)
+	q1, c := bits.Add64(q.L1, 0, c)
+	q2, c := bits.Add64(q.L2, 0, c)
+	q3, c := bits.Add64(q.L3, 0, c)
+	return Uint256{q0, q1, q2, q3}, st | uint(c)
+}
+
+// div512o divides hi:lo by d and returns the low 256 bits of the quotient,
+// the remainder and a status: 1 when the quotient overflowed, 2 for d == 0.
+// It is long division by limbs shifted so d has its top bit set,
+// the remainder carried in as many limbs as d has.
+// An overflow first takes the steps of the quotient limbs above 2^256,
+// which only reduce hi
+func div512o(hi, lo, d Uint256) (q, r Uint256, st uint) {
+	// the quotient overflows when hi is not below d
+	_, b := bits.Sub64(hi.L0, d.L0, 0)
+	_, b = bits.Sub64(hi.L1, d.L1, b)
+	_, b = bits.Sub64(hi.L2, d.L2, b)
+	_, b = bits.Sub64(hi.L3, d.L3, b)
+	st = uint(1 - b)
+	// in every case >>1>>t is >>(64-s) that gives 0 at s = 0,
+	// and hi.L3>>1>>t < 2^s is below the top limb of the shifted divisor
+	switch {
+	case d.L3 != 0:
+		s := uint(bits.LeadingZeros64(d.L3))
+		t := ^s & 63
+		d3 := d.L3<<s | d.L2>>1>>t
+		d2 := d.L2<<s | d.L1>>1>>t
+		d1 := d.L1<<s | d.L0>>1>>t
+		d0 := d.L0 << s
+		r3 := hi.L3<<s | hi.L2>>1>>t
+		r2 := hi.L2<<s | hi.L1>>1>>t
+		r1 := hi.L1<<s | hi.L0>>1>>t
+		r0 := hi.L0<<s | lo.L3>>1>>t
+		u3 := lo.L3<<s | lo.L2>>1>>t
+		u2 := lo.L2<<s | lo.L1>>1>>t
+		u1 := lo.L1<<s | lo.L0>>1>>t
+		u0 := lo.L0 << s
+		v := reciprocal3by2m(d3, d2)
+		if st != 0 {
+			_, r3, r2, r1, r0 = knuthStep4m(hi.L3>>1>>t, r3, r2, r1, r0, d3, d2, d1, d0, v)
+		}
+		q.L3, r3, r2, r1, r0 = knuthStep4m(r3, r2, r1, r0, u3, d3, d2, d1, d0, v)
+		q.L2, r3, r2, r1, r0 = knuthStep4m(r3, r2, r1, r0, u2, d3, d2, d1, d0, v)
+		q.L1, r3, r2, r1, r0 = knuthStep4m(r3, r2, r1, r0, u1, d3, d2, d1, d0, v)
+		q.L0, r3, r2, r1, r0 = knuthStep4m(r3, r2, r1, r0, u0, d3, d2, d1, d0, v)
+		return q, Uint256{r0>>s | r1<<1<<t, r1>>s | r2<<1<<t, r2>>s | r3<<1<<t, r3 >> s}, st
+	case d.L2 != 0:
+		s := uint(bits.LeadingZeros64(d.L2))
+		t := ^s & 63
+		d2 := d.L2<<s | d.L1>>1>>t
+		d1 := d.L1<<s | d.L0>>1>>t
+		d0 := d.L0 << s
+		r2 := hi.L2<<s | hi.L1>>1>>t
+		r1 := hi.L1<<s | hi.L0>>1>>t
+		r0 := hi.L0<<s | lo.L3>>1>>t
+		u3 := lo.L3<<s | lo.L2>>1>>t
+		u2 := lo.L2<<s | lo.L1>>1>>t
+		u1 := lo.L1<<s | lo.L0>>1>>t
+		u0 := lo.L0 << s
+		v := reciprocal3by2m(d2, d1)
+		if st != 0 {
+			_, r2, r1, r0 = knuthStep3m(hi.L3>>1>>t, hi.L3<<s|hi.L2>>1>>t, r2, r1, d2, d1, d0, v)
+			_, r2, r1, r0 = knuthStep3m(r2, r1, r0, hi.L0<<s|lo.L3>>1>>t, d2, d1, d0, v)
+		}
+		q.L3, r2, r1, r0 = knuthStep3m(r2, r1, r0, u3, d2, d1, d0, v)
+		q.L2, r2, r1, r0 = knuthStep3m(r2, r1, r0, u2, d2, d1, d0, v)
+		q.L1, r2, r1, r0 = knuthStep3m(r2, r1, r0, u1, d2, d1, d0, v)
+		q.L0, r2, r1, r0 = knuthStep3m(r2, r1, r0, u0, d2, d1, d0, v)
+		return q, Uint256{r0>>s | r1<<1<<t, r1>>s | r2<<1<<t, r2 >> s, 0}, st
+	case d.L1 != 0:
+		s := uint(bits.LeadingZeros64(d.L1))
+		t := ^s & 63
+		d1 := d.L1<<s | d.L0>>1>>t
+		d0 := d.L0 << s
+		r1 := hi.L1<<s | hi.L0>>1>>t
+		r0 := hi.L0<<s | lo.L3>>1>>t
+		u3 := lo.L3<<s | lo.L2>>1>>t
+		u2 := lo.L2<<s | lo.L1>>1>>t
+		u1 := lo.L1<<s | lo.L0>>1>>t
+		u0 := lo.L0 << s
+		v := reciprocal3by2m(d1, d0)
+		if st != 0 {
+			_, r1, r0 = udivrem3by2m(hi.L3>>1>>t, hi.L3<<s|hi.L2>>1>>t, hi.L2<<s|hi.L1>>1>>t, d1, d0, v)
+			_, r1, r0 = udivrem3by2m(r1, r0, hi.L1<<s|hi.L0>>1>>t, d1, d0, v)
+			_, r1, r0 = udivrem3by2m(r1, r0, hi.L0<<s|lo.L3>>1>>t, d1, d0, v)
+		}
+		q.L3, r1, r0 = udivrem3by2m(r1, r0, u3, d1, d0, v)
+		q.L2, r1, r0 = udivrem3by2m(r1, r0, u2, d1, d0, v)
+		q.L1, r1, r0 = udivrem3by2m(r1, r0, u1, d1, d0, v)
+		q.L0, r1, r0 = udivrem3by2m(r1, r0, u0, d1, d0, v)
+		return q, Uint256{r0>>s | r1<<1<<t, r1 >> s, 0, 0}, st
+	}
+	// d < 2^64 here, a zero d is the only one to come this far
+	if d.L0 == 0 {
+		return q, r, 2
+	}
+	if arch.IsAmd64 {
+		// one limb: a hardware division per quotient limb,
+		// hi < d leaves hi.L0 below d.L0
+		r0 := hi.L0
+		if st != 0 {
+			_, r0 = bits.Div64(0, hi.L3, d.L0)
+			_, r0 = bits.Div64(r0, hi.L2, d.L0)
+			_, r0 = bits.Div64(r0, hi.L1, d.L0)
+			_, r0 = bits.Div64(r0, hi.L0, d.L0)
+		}
+		q.L3, r0 = bits.Div64(r0, lo.L3, d.L0)
+		q.L2, r0 = bits.Div64(r0, lo.L2, d.L0)
+		q.L1, r0 = bits.Div64(r0, lo.L1, d.L0)
+		q.L0, r0 = bits.Div64(r0, lo.L0, d.L0)
+		return q, Uint256{r0, 0, 0, 0}, st
+	}
+	s := uint(bits.LeadingZeros64(d.L0)) & 63
+	t := ^s & 63
+	d0 := d.L0 << s
+	r0 := hi.L0<<s | lo.L3>>1>>t
+	v := reciprocal2by1(d0)
+	// the steps with their second correction as a branch,
+	// faster on Graviton in our benchmarks
+	if st != 0 {
+		_, r0 = div2by1r(hi.L3>>1>>t, hi.L3<<s|hi.L2>>1>>t, d0, v)
+		_, r0 = div2by1r(r0, hi.L2<<s|hi.L1>>1>>t, d0, v)
+		_, r0 = div2by1r(r0, hi.L1<<s|hi.L0>>1>>t, d0, v)
+		_, r0 = div2by1r(r0, hi.L0<<s|lo.L3>>1>>t, d0, v)
+	}
+	q.L3, r0 = div2by1r(r0, lo.L3<<s|lo.L2>>1>>t, d0, v)
+	q.L2, r0 = div2by1r(r0, lo.L2<<s|lo.L1>>1>>t, d0, v)
+	q.L1, r0 = div2by1r(r0, lo.L1<<s|lo.L0>>1>>t, d0, v)
+	q.L0, r0 = div2by1r(r0, lo.L0<<s, d0, v)
+	return q, Uint256{r0 >> s, 0, 0, 0}, st
+}
+
+// reciprocal3by2m returns the reciprocal (2^192-1)/<d1, d0> - 2^64.
+// d1 must have its top bit set, else the result is wrong or it panics.
+// The corrections go by flags: as branches they follow the data and mispredict
+func reciprocal3by2m(d1, d0 uint64) uint64 {
+	var v uint64
+	if arch.IsAmd64 {
+		// one hardware 128-by-64 division there
+		v, _ = bits.Div64(^d1, math.MaxUint64, d1)
+	} else {
+		v = reciprocal2by1(d1)
+	}
+	p, c := bits.Add64(d1*v, d0, 0)
+	_, b := bits.Sub64(p, d1, 0)
+	// a carry takes one off v, two when p stays at d1 or above
+	m := c + c&^b
+	v -= m
+	p -= d1 * m
+	t1, t0 := bits.Mul64(v, d0)
+	p, c = bits.Add64(p, t1, 0)
+	_, b = bits.Sub64(t0, d0, 0)
+	_, b = bits.Sub64(p, d1, b)
+	return v - c - c&^b
+}
+
+// udivrem3by2m returns <u2, u1, u0> / <d1, d0> and the remainder <r1, r0>,
+// v from reciprocal3by2m.
+// It needs <u2, u1> < <d1, d0> and the top bit of d1 set,
+// other inputs give a wrong result.
+// The first correction goes by conditional moves, that branch is a coin toss
+func udivrem3by2m(u2, u1, u0, d1, d0, v uint64) (q, r1, r0 uint64) {
+	q, k := bits.Mul64(v, u2)
+	k, c := bits.Add64(k, u1, 0)
+	q, _ = bits.Add64(q, u2, c)
+	r1 = u1 - q*d1
+	t1, t0 := bits.Mul64(d0, q)
+	r0, b := bits.Sub64(u0, t0, 0)
+	r1, _ = bits.Sub64(r1, t1, b)
+	// r - d with its top limb below k keeps q + 1, else q and r:
+	// only moves under the if keep it branchless
+	s0, b := bits.Sub64(r0, d0, 0)
+	s1, _ := bits.Sub64(r1, d1, b)
+	if s1 < k {
+		q, r0, r1 = q+1, s0, s1
+	}
+	// rare
+	if r1 >= d1 {
+		if r1 > d1 || r0 >= d0 {
+			q++
+			r0, b = bits.Sub64(r0, d0, 0)
+			r1, _ = bits.Sub64(r1, d1, b)
+		}
+	}
+	return q, r1, r0
+}
+
+// knuthStep3m is a step of Knuth's algorithm D: <a3, a2, a1, a0> / d
+// and the remainder for d = <d2, d1, d0>, the digit as in udivrem3by2m.
+// It needs <a3, a2, a1> < d, the top bit of d2 set,
+// and v = reciprocal3by2m(d2, d1); other inputs give a wrong result
+func knuthStep3m(a3, a2, a1, a0, d2, d1, d0, v uint64) (q, r2, r1, r0 uint64) {
+	var b, c uint64
+	if a3 == d2 && a2 == d1 {
+		// the digit is exactly 2^64-1 here, so a - q*d is a + d - d<<64
+		r0, c = bits.Add64(a0, d0, 0)
+		r1, c = bits.Add64(a1, d1, c)
+		r2, _ = bits.Add64(a2, d2, c)
+		r1, b = bits.Sub64(r1, d0, 0)
+		r2, _ = bits.Sub64(r2, d1, b)
+		return math.MaxUint64, r2, r1, r0
+	}
+	q, k := bits.Mul64(v, a3)
+	k, c = bits.Add64(k, a2, 0)
+	q, _ = bits.Add64(q, a3, c)
+	r2 = a2 - q*d2
+	t1, t0 := bits.Mul64(d1, q)
+	r1, b = bits.Sub64(a1, t0, 0)
+	r2, _ = bits.Sub64(r2, t1, b)
+	s0, b := bits.Sub64(r1, d1, 0)
+	s1, _ := bits.Sub64(r2, d2, b)
+	if s1 < k {
+		q, r1, r2 = q+1, s0, s1
+	}
+	// rare
+	if r2 >= d2 {
+		if r2 > d2 || r1 >= d1 {
+			q++
+			r1, b = bits.Sub64(r1, d1, 0)
+			r2, _ = bits.Sub64(r2, d2, b)
+		}
+	}
+	// q*d0 off the low limb
+	t1, t0 = bits.Mul64(q, d0)
+	r0, b = bits.Sub64(a0, t0, 0)
+	r1, b = bits.Sub64(r1, t1, b)
+	r2, b = bits.Sub64(r2, 0, b)
+	// rare: the digit was one too big, add the divisor back
+	if b != 0 {
+		q--
+		r0, c = bits.Add64(r0, d0, 0)
+		r1, c = bits.Add64(r1, d1, c)
+		r2, _ = bits.Add64(r2, d2, c)
+	}
+	return q, r2, r1, r0
+}
+
+// knuthStep4m is a step of Knuth's algorithm D: <a4, a3, a2, a1, a0> / d
+// and the remainder for d = <d3, d2, d1, d0>, the digit as in udivrem3by2m.
+// It needs <a4, a3, a2, a1> < d, the top bit of d3 set,
+// and v = reciprocal3by2m(d3, d2); other inputs give a wrong result
+func knuthStep4m(a4, a3, a2, a1, a0, d3, d2, d1, d0, v uint64) (q, r3, r2, r1, r0 uint64) {
+	var b, c uint64
+	if a4 == d3 && a3 == d2 {
+		// the digit is exactly 2^64-1 here, so a - q*d is a + d - d<<64
+		r0, c = bits.Add64(a0, d0, 0)
+		r1, c = bits.Add64(a1, d1, c)
+		r2, c = bits.Add64(a2, d2, c)
+		r3, _ = bits.Add64(a3, d3, c)
+		r1, b = bits.Sub64(r1, d0, 0)
+		r2, b = bits.Sub64(r2, d1, b)
+		r3, _ = bits.Sub64(r3, d2, b)
+		return math.MaxUint64, r3, r2, r1, r0
+	}
+	q, k := bits.Mul64(v, a4)
+	k, c = bits.Add64(k, a3, 0)
+	q, _ = bits.Add64(q, a4, c)
+	r3 = a3 - q*d3
+	t1, t0 := bits.Mul64(d2, q)
+	r2, b = bits.Sub64(a2, t0, 0)
+	r3, _ = bits.Sub64(r3, t1, b)
+	s0, b := bits.Sub64(r2, d2, 0)
+	s1, _ := bits.Sub64(r3, d3, b)
+	if s1 < k {
+		q, r2, r3 = q+1, s0, s1
+	}
+	// rare
+	if r3 >= d3 {
+		if r3 > d3 || r2 >= d2 {
+			q++
+			r2, b = bits.Sub64(r2, d2, 0)
+			r3, _ = bits.Sub64(r3, d3, b)
+		}
+	}
+	// q*<d1, d0> off the low limbs
+	t1, t0 = bits.Mul64(q, d0)
+	t2, t := bits.Mul64(q, d1)
+	t1, c = bits.Add64(t1, t, 0)
+	t2 += c
+	r0, b = bits.Sub64(a0, t0, 0)
+	r1, b = bits.Sub64(a1, t1, b)
+	r2, b = bits.Sub64(r2, t2, b)
+	r3, b = bits.Sub64(r3, 0, b)
+	// rare: the digit was one too big, add the divisor back
+	if b != 0 {
+		q--
+		r0, c = bits.Add64(r0, d0, 0)
+		r1, c = bits.Add64(r1, d1, c)
+		r2, c = bits.Add64(r2, d2, c)
+		r3, _ = bits.Add64(r3, d3, c)
+	}
+	return q, r3, r2, r1, r0
 }
