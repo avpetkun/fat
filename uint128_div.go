@@ -730,6 +730,173 @@ func (x Uint128) MulMod(y, m Uint128) (r Uint128) {
 	return
 }
 
+// ExpMod returns x^y % m, 0^0 is 1, it panics for m == 0
+func (x Uint128) ExpMod(y, m Uint128) Uint128 {
+	r, zero := x.expMod(y, m)
+	if zero {
+		panic("fat.Uint128.ExpMod: division by zero")
+	}
+	return r
+}
+
+// expMod is ExpMod and true for m == 0, with a zero result
+func (x Uint128) expMod(y, m Uint128) (Uint128, bool) {
+	// m == 1 gives 0, one test for both
+	if m.L1 == 0 && m.L0 <= 1 {
+		return Uint128{}, m.L0 == 0
+	}
+	if y.IsZero() {
+		return Uint128{L0: 1}, false
+	}
+	b := x
+	if !b.LessThan(m) {
+		b = b.mod(m)
+	}
+	if m.L0&1 == 0 {
+		return expModEven128(b, y, m), false
+	}
+	return expModOdd128(b, y.Uint256(), m), false
+}
+
+// expModEven128 is expModEven on 128 bits
+func expModEven128(b, y, m Uint128) Uint128 {
+	k := m.TrailingZeros()
+	mask := Uint128{}.Not().Rsh(128 - k)
+	c := b.Expu(y).And(mask)
+	q := m.Rsh(k)
+	// q is odd, so q == 1 by one OR
+	if q.L0^1|q.L1 == 0 {
+		return c
+	}
+	if !b.LessThan(q) {
+		b = b.mod(q)
+	}
+	a := expModOdd128(b, y.Uint256(), q)
+	// 1/q % 2^128 by Newton steps
+	v := q
+	for range 6 {
+		v = v.Mulu(Uint128{L0: 2}.Subu(q.Mulu(v)))
+	}
+	return a.Addu(q.Mulu(c.Subu(a).Mulu(v).And(mask)))
+}
+
+// expModOdd128 is expModOdd on 128 bits
+func expModOdd128(b Uint128, y Uint256, m Uint128) Uint128 {
+	if m.L1 == 0 {
+		return Uint128{L0: expModMont64(b.L0, y, m.L0)}
+	}
+	return expModMont128(b, y, m)
+}
+
+// montMul128 returns a * b / 2^128 % m by Montgomery's product, montMul
+// on two limbs. m must be odd and a, b below it, mp = -1/m mod 2^64, else
+// it is wrong
+func montMul128(a, b, m Uint128, mp uint64) Uint128 {
+	h0, p0 := bits.Mul64(a.L0, b.L0)
+	h1, l1 := bits.Mul64(a.L1, b.L0)
+	h2, l2 := bits.Mul64(a.L0, b.L1)
+	h3, l3 := bits.Mul64(a.L1, b.L1)
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c := bits.Add64(h1, l3, c)
+	p3 := h3 + c
+	p1, c = bits.Add64(p1, l2, 0)
+	p2, c = bits.Add64(p2, h2, c)
+	p3 += c
+	// k carries into the limb above each round; the low half of u*m0 is
+	// -p_i by the choice of u, so only its high half is taken
+	var u, k uint64
+	u = p0 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p0))
+	c, p1 = madd(u, m.L1, p1, c)
+	p2, k = bits.Add64(p2, c, 0)
+	u = p1 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p1))
+	c, p2 = madd(u, m.L1, p2, c)
+	p3, k = bits.Add64(p3, c, k)
+	// p3:p2 + k*2^128 < 2m: less m unless below it, picked by a mask
+	r0, br := bits.Sub64(p2, m.L0, 0)
+	r1, br := bits.Sub64(p3, m.L1, br)
+	keep := -(br &^ k)
+	return Uint128{r0&^keep | p2&keep, r1&^keep | p3&keep}
+}
+
+// montSqr128 is montMul128(a, a, m, mp) by 3 limb products for 4
+func montSqr128(a, m Uint128, mp uint64) Uint128 {
+	h01, l01 := bits.Mul64(a.L0, a.L1)
+	s0h, p0 := bits.Mul64(a.L0, a.L0)
+	s1h, s1l := bits.Mul64(a.L1, a.L1)
+	// the cross product doubled, the squares on the even limbs
+	p1, c := bits.Add64(l01<<1, s0h, 0)
+	p2, c := bits.Add64(h01<<1|l01>>63, s1l, c)
+	p3 := h01>>63 + s1h + c
+	// k carries into the limb above each round; the low half of u*m0 is
+	// -p_i by the choice of u, so only its high half is taken
+	var u, k uint64
+	u = p0 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p0))
+	c, p1 = madd(u, m.L1, p1, c)
+	p2, k = bits.Add64(p2, c, 0)
+	u = p1 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p1))
+	c, p2 = madd(u, m.L1, p2, c)
+	p3, k = bits.Add64(p3, c, k)
+	// p3:p2 + k*2^128 < 2m: less m unless below it, picked by a mask
+	r0, br := bits.Sub64(p2, m.L0, 0)
+	r1, br := bits.Sub64(p3, m.L1, br)
+	keep := -(br &^ k)
+	return Uint128{r0&^keep | p2&keep, r1&^keep | p3&keep}
+}
+
+// expModMont128 is expModMont for an odd m in 2^64..2^128-1, y > 0 and
+// b < m, by Montgomery products modulo R = 2^128
+func expModMont128(b Uint128, y Uint256, m Uint128) Uint128 {
+	mp := montInv(m.L0)
+	// R % m from 2^128 - m, then R^2 % m to take b to R*b % m
+	r := Uint128{}.Subu(m).mod(m)
+	_, r2, _ := r.mulDivMod(r, m)
+	var odd [8]Uint128
+	odd[0] = montMul128(b, r2, m, mp)
+	n, w := y.BitLen(), expWindow(y.BitLen())
+	if w > 1 {
+		b2 := montSqr128(odd[0], m, mp)
+		for k := 1; k < 1<<(w-1); k++ {
+			odd[k] = montMul128(odd[k-1], b2, m, mp)
+		}
+	}
+	// the top bit of y is set, so the first window starts r
+	started := false
+	for i := n - 1; i >= 0; {
+		if y.Bit(i) == 0 {
+			r = montSqr128(r, m, mp)
+			i--
+			continue
+		}
+		j := max(i-w+1, 0)
+		for y.Bit(j) == 0 {
+			j++
+		}
+		v := 0
+		for k := i; k >= j; k-- {
+			v = v<<1 | int(y.Bit(k))
+			if started {
+				r = montSqr128(r, m, mp)
+			}
+		}
+		if started {
+			r = montMul128(r, odd[v>>1], m, mp)
+		} else {
+			r, started = odd[v>>1], true
+		}
+		i = j - 1
+	}
+	// out of the Montgomery form
+	return montMul128(r, Uint128{L0: 1}, m, mp)
+}
+
 // mulDivMod is MulDivMod with the low 128 bits of q and a status:
 // 1 when q overflowed, 2 for d == 0
 func (x Uint128) mulDivMod(y, d Uint128) (q, r Uint128, st uint) {

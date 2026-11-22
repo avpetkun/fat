@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+
+	"github.com/avpetkun/fat/internal/arch"
 )
 
 // Uint256 is an unsigned 256-bit integer of 64-bit limbs, L0 is the lowest
@@ -1040,6 +1042,29 @@ func (x Uint256) Mulu(y Uint256) Uint256 {
 	return Uint256{r0, r1, r2, r3}
 }
 
+// sqru is x.Mulu(x) with the repeated products taken once, 10 multiplies
+// in place of 16: the multiplier is the bound on Graviton
+func (x Uint256) sqru() Uint256 {
+	h0, r0 := bits.Mul64(x.L0, x.L0)
+	h1, p1 := bits.Mul64(x.L1, x.L0)
+	h2, p2 := bits.Mul64(x.L2, x.L0)
+	var c uint64
+	p1, c = bits.Add64(p1, h0, 0)
+	p2, c = bits.Add64(p2, h1, c)
+	p3, _ := bits.Add64(x.L3*x.L0, h2, c)
+	g0, q1 := bits.Mul64(x.L0, x.L1)
+	g1, q2 := bits.Mul64(x.L1, x.L1)
+	q2, c = bits.Add64(q2, g0, 0)
+	q3, _ := bits.Add64(x.L2*x.L1, g1, c)
+	f0, s2 := bits.Mul64(x.L0, x.L2)
+	r1, c := bits.Add64(p1, q1, 0)
+	r2, c := bits.Add64(p2, q2, c)
+	r3, _ := bits.Add64(p3, q3, c)
+	r2, c = bits.Add64(r2, s2, 0)
+	r3, _ = bits.Add64(r3, x.L1*x.L2+f0+x.L0*x.L3, c)
+	return Uint256{r0, r1, r2, r3}
+}
+
 // Mule returns the 512-bit product x * y as hi * 2^256 + lo
 func (x Uint256) Mule(y Uint256) (hi, lo Uint256) {
 	// row by row, each row a chain of the low halves into the running sum,
@@ -1203,4 +1228,346 @@ func (x Uint256) Mul64u(y uint64) Uint256 {
 	r1, c = bits.Add64(r1, h0, 0)
 	r2, c = bits.Add64(r2, h1, c)
 	return Uint256{r0, r1, r2, x.L3*v + h2 + c}
+}
+
+// --- pow ------------------------------------------------
+
+// Exp returns x^y, 0^0 is 1, it panics on overflow
+func (x Uint256) Exp(y Uint256) Uint256 {
+	if y.L3|y.L2|y.L1 != 0 || y.L0 >= 256 {
+		// x >= 2 overflows from y = 256 on, 0 and 1 stay
+		if x.L3|x.L2|x.L1 != 0 || x.L0 > 1 {
+			panic("fat.Uint256.Exp: overflow")
+		}
+		return x
+	}
+	r, over := x.exp(y.L0)
+	if over {
+		panic("fat.Uint256.Exp: overflow")
+	}
+	return r
+}
+
+// Expo returns Expu and whether x^y overflowed
+func (x Uint256) Expo(y Uint256) (r Uint256, overflow bool) {
+	if y.L3|y.L2|y.L1 != 0 || y.L0 >= 256 {
+		return x.Expu(y), x.L3|x.L2|x.L1 != 0 || x.L0 > 1
+	}
+	return x.exp(y.L0)
+}
+
+// exp is Expo for n < 256 only, a huge n gives a wrong overflow flag
+func (x Uint256) exp(n uint64) (r Uint256, over bool) {
+	if n < 2 {
+		m := -n
+		return Uint256{x.L0&m | 1&^m, x.L1 & m, x.L2 & m, x.L3 & m}, false
+	}
+	// all but the top bit of n
+	r, s := x.powBits(n, bits.Len64(n)-2)
+	o1 := s.L3|s.L2 != 0
+	s = s.sqru()
+	// x < 2^len, no overflow while len*n fits
+	t := x.BitLen()
+	if t*int(n) <= 256 {
+		return r.Mulu(s), false
+	}
+	// x >= 2^(len-1), so the power overflows for sure from (len-1)*n = 256 on.
+	// Below that x^n < 2^(256+n), so the powers up to x^(n/2) fit,
+	// which covers every product in powBits:
+	// only the last square and the product with it can overflow
+	r, o2 := r.Mulo(s)
+	return r, (t-1)*int(n) >= 256 || o1 || o2
+}
+
+// Expu returns x^y wrapped around as on a Go integer, 0^0 is 1
+func (x Uint256) Expu(y Uint256) Uint256 {
+	if x.L0&1 == 0 {
+		// an even x^y has y factors of 2, so it wraps to 0 from y = 256 on
+		if y.L3|y.L2|y.L1 != 0 || y.L0 >= 256 {
+			return Uint256{}
+		}
+	} else if y.L3|y.L2|y.L1 != 0 {
+		return x.expuOdd(y)
+	}
+	// the top bit of y is one more step, none for y = 0
+	r, _ := x.powBits(y.L0, bits.Len64(y.L0)-1)
+	return r
+}
+
+// expuOdd is Expu for an odd x only, an even x gives a wrong result.
+// The steps over the low limb of y leave x^(2^64) = 1 + c*2^66,
+// and its power Y = y >> 64 is a binomial sum that ends at the cube
+// as c^4 * 2^264 is past 256 bits.
+// A 256-bit y costs the 64 steps of a 64-bit one
+func (x Uint256) expuOdd(y Uint256) Uint256 {
+	r, s := x.powBits(y.L0, 63)
+	s = s.Mulu(s)
+	c := Uint256{s.L1>>2 | s.L2<<62, s.L2>>2 | s.L3<<62, s.L3 >> 2, 0}
+	// Y*c at 2^66
+	t := Uint256{y.L1, y.L2, y.L3, 0}.Mulu(c)
+	// C(Y,2)*c^2 at 2^132, the low 128 bits are enough:
+	// a product of two consecutive values halves exactly
+	y0 := Uint128{y.L1, y.L2}
+	b2 := y0.Mulu(y0.Sub64u(1))
+	b2 = Uint128{b2.L0>>1 | b2.L1<<63, b2.L1 >> 1}
+	c0 := Uint128{c.L0, c.L1}
+	t2 := b2.Mulu(c0.Mulu(c0))
+	// C(Y,3)*c^3 at 2^198 from the low limbs, /3 by the inverse of 3
+	t3 := b2.L0 * (y.L1 - 2) * 0xAAAAAAAAAAAAAAAB * c.L0 * c.L0 * c.L0
+	p2, carry := bits.Add64(t.L0>>62|t.L1<<2, t2.L0<<4, 0)
+	p3 := t.L1>>62 + t.L2<<2 + t2.L0>>60 + t2.L1<<4 + t3<<6 + carry
+	return r.Mulu(Uint256{1, t.L0 << 2, p2, p3})
+}
+
+// powBits returns x^(k+1 low bits of n) wrapped around and x^(2^k).
+// It goes over the bits of n from the low one:
+// the squares x^(2^i) form one chain, the products at the set bits another,
+// so a step waits for one multiply and not two.
+// The square or 1 is picked by a mask, faster than a branch on a random bit.
+// Both products are written out: a call to Mulu would spill the other chain
+func (x Uint256) powBits(n uint64, k int) (r, s Uint256) {
+	if k >= powPairsMin {
+		return x.powPairs(n, k)
+	}
+	m := -(n & 1)
+	r, s = Uint256{x.L0&m | 1&^m, x.L1 & m, x.L2 & m, x.L3 & m}, x
+	for range k {
+		// s *= s
+		h0, r0 := bits.Mul64(s.L0, s.L0)
+		h1, p1 := bits.Mul64(s.L1, s.L0)
+		h2, p2 := bits.Mul64(s.L2, s.L0)
+		p1, c := bits.Add64(p1, h0, 0)
+		p2, c = bits.Add64(p2, h1, c)
+		p3, _ := bits.Add64(s.L3*s.L0, h2, c)
+		g0, q1 := bits.Mul64(s.L0, s.L1)
+		g1, q2 := bits.Mul64(s.L1, s.L1)
+		q2, c = bits.Add64(q2, g0, 0)
+		q3, _ := bits.Add64(s.L2*s.L1, g1, c)
+		f0, s2 := bits.Mul64(s.L0, s.L2)
+		r1, c := bits.Add64(p1, q1, 0)
+		r2, c := bits.Add64(p2, q2, c)
+		r3, _ := bits.Add64(p3, q3, c)
+		r2, c = bits.Add64(r2, s2, 0)
+		r3, _ = bits.Add64(r3, s.L1*s.L2+f0+s.L0*s.L3, c)
+		s = Uint256{r0, r1, r2, r3}
+		// r *= s or 1
+		n >>= 1
+		m := -(n & 1)
+		y0, y1, y2, y3 := s.L0&m|1&^m, s.L1&m, s.L2&m, s.L3&m
+		h0, r0 = bits.Mul64(r.L0, y0)
+		h1, p1 = bits.Mul64(r.L1, y0)
+		h2, p2 = bits.Mul64(r.L2, y0)
+		p1, c = bits.Add64(p1, h0, 0)
+		p2, c = bits.Add64(p2, h1, c)
+		p3, _ = bits.Add64(r.L3*y0, h2, c)
+		g0, q1 = bits.Mul64(r.L0, y1)
+		g1, q2 = bits.Mul64(r.L1, y1)
+		q2, c = bits.Add64(q2, g0, 0)
+		q3, _ = bits.Add64(r.L2*y1, g1, c)
+		f0, s2 = bits.Mul64(r.L0, y2)
+		r1, c = bits.Add64(p1, q1, 0)
+		r2, c = bits.Add64(p2, q2, c)
+		r3, _ = bits.Add64(p3, q3, c)
+		r2, c = bits.Add64(r2, s2, 0)
+		r3, _ = bits.Add64(r3, r.L1*y2+f0+r.L0*y3, c)
+		r = Uint256{r0, r1, r2, r3}
+	}
+	return
+}
+
+// powPairsMin is the k from which powBits goes by pairs of bits,
+// where pairs are faster in our benchmarks
+const powPairsMin = 15
+
+// powPairs is powBits by pairs of bits of n, for a CPU where the multiplier
+// and not the wait for a product is the bound.
+// b[d] collects the squares x^(4^j) at the pairs equal to d,
+// one product per pair where powBits has two.
+// A zero pair multiplies into b[0], a branch on it would mispredict.
+// x^n is b[1] * b[2]^2 * b[3]^3, faster on Graviton in our benchmarks
+func (x Uint256) powPairs(n uint64, k int) (r, s Uint256) {
+	// the bits past k are not in the power
+	n &= 1<<uint(k+1) - 1
+	b := [4]Uint256{{1, 0, 0, 0}, {1, 0, 0, 0}, {1, 0, 0, 0}, {1, 0, 0, 0}}
+	s = x
+	for i := range k {
+		if i&1 == 0 {
+			// b[d] *= s
+			p := &b[n&3]
+			n >>= 2
+			h0, r0 := bits.Mul64(p.L0, s.L0)
+			h1, p1 := bits.Mul64(p.L1, s.L0)
+			h2, p2 := bits.Mul64(p.L2, s.L0)
+			p1, c := bits.Add64(p1, h0, 0)
+			p2, c = bits.Add64(p2, h1, c)
+			p3, _ := bits.Add64(p.L3*s.L0, h2, c)
+			g0, q1 := bits.Mul64(p.L0, s.L1)
+			g1, q2 := bits.Mul64(p.L1, s.L1)
+			q2, c = bits.Add64(q2, g0, 0)
+			q3, _ := bits.Add64(p.L2*s.L1, g1, c)
+			f0, s2 := bits.Mul64(p.L0, s.L2)
+			r1, c := bits.Add64(p1, q1, 0)
+			r2, c := bits.Add64(p2, q2, c)
+			r3, _ := bits.Add64(p3, q3, c)
+			r2, c = bits.Add64(r2, s2, 0)
+			r3, _ = bits.Add64(r3, p.L1*s.L2+f0+p.L0*s.L3, c)
+			*p = Uint256{r0, r1, r2, r3}
+		}
+		// s *= s
+		h0, r0 := bits.Mul64(s.L0, s.L0)
+		h1, p1 := bits.Mul64(s.L1, s.L0)
+		h2, p2 := bits.Mul64(s.L2, s.L0)
+		p1, c := bits.Add64(p1, h0, 0)
+		p2, c = bits.Add64(p2, h1, c)
+		p3, _ := bits.Add64(s.L3*s.L0, h2, c)
+		g0, q1 := bits.Mul64(s.L0, s.L1)
+		g1, q2 := bits.Mul64(s.L1, s.L1)
+		q2, c = bits.Add64(q2, g0, 0)
+		q3, _ := bits.Add64(s.L2*s.L1, g1, c)
+		f0, s2 := bits.Mul64(s.L0, s.L2)
+		r1, c := bits.Add64(p1, q1, 0)
+		r2, c := bits.Add64(p2, q2, c)
+		r3, _ := bits.Add64(p3, q3, c)
+		r2, c = bits.Add64(r2, s2, 0)
+		r3, _ = bits.Add64(r3, s.L1*s.L2+f0+s.L0*s.L3, c)
+		s = Uint256{r0, r1, r2, r3}
+	}
+	if k&1 == 0 {
+		// an even k leaves bit k for a pair of its own
+		b[n&3] = b[n&3].Mulu(s)
+	}
+	// t runs over b[3], b[3]*b[2] and b[3]*b[2]*b[1], r is their product
+	t := b[3].Mulu(b[2])
+	r = b[3].Mulu(t)
+	t = t.Mulu(b[1])
+	return r.Mulu(t), s
+}
+
+// --- roots ----------------------------------------------
+
+// Sqrt returns the square root of x rounded down
+func (x Uint256) Sqrt() Uint256 {
+	if x.L3|x.L2 == 0 {
+		return Uint256{Uint128{x.L0, x.L1}.Sqrt().L0, 0, 0, 0}
+	}
+	if !arch.IsAmd64 {
+		// the steps below with fewer instructions,
+		// amd64 keeps the division-based root.
+		// The shifts take masked counts, so no count compare and select
+		// for a count that may reach 64.
+		// reciprocal2by1 is written out, a call spills what is live around it.
+		// Faster past 2^128 on Graviton in our benchmarks
+		a3, a2, a1, a0 := x.L3, x.L2, x.L1, x.L0
+		h := uint(0)
+		if a3 == 0 {
+			a3, a2, a1, a0 = a2, a1, a0, 0
+			h = 32
+		}
+		// k is even and at most 62, >>1>>t is >>(64-k) that gives 0 at k = 0
+		k := uint(bits.LeadingZeros64(a3)) & 62
+		t := ^k & 63
+		a3 = a3<<k | a2>>1>>t
+		a2 = a2<<k | a1>>1>>t
+		a1 = a1<<k | a0>>1>>t
+		a0 <<= k
+		h += k >> 1
+		s1, rh, rl := sqrtrem128n(a3, a2)
+		nh := rh<<63 | rl>>1
+		nl := rl<<63 | a1>>1
+		var q, u, uh uint64
+		if nh < s1 {
+			v := (1<<47 - 1) / (s1>>40 + 1)
+			d0 := s1 & 1
+			e := (v>>1)&-d0 - v*(s1>>1+d0)
+			hi, _ := bits.Mul64(e, e)
+			e += hi >> 22
+			hi, _ = bits.Mul64(v<<19, e)
+			v = v<<41 + hi
+			hi, lo := bits.Mul64(v, s1)
+			_, b := bits.Sub64(^s1, lo, 0)
+			v, _ = bits.Sub64(v, hi+s1, b)
+			q, u = div2by1(nh, nl, s1, v)
+		} else {
+			q = math.MaxUint64
+			u, uh = bits.Add64(nl, s1, 0)
+		}
+		qh, ql := bits.Mul64(q, q)
+		_, b := bits.Sub64(a0, ql, 0)
+		_, b = bits.Sub64(u<<1|a1&1, qh, b)
+		_, b = bits.Sub64(uh<<1|u>>63, 0, b)
+		q, b = bits.Sub64(q, b, 0)
+		s1 -= b
+		// h is at most 63, <<1<<(63-h) is <<(64-h) that gives 0 at h = 0
+		return Uint256{q>>(h&63) | s1<<1<<(^h&63), s1 >> (h & 63), 0, 0}
+	}
+	// an even shift puts 1 or 2 bits on top, the root shifts by half of it
+	a3, a2, a1, a0 := x.L3, x.L2, x.L1, x.L0
+	h := uint(0)
+	if a3 == 0 {
+		a3, a2, a1, a0 = a2, a1, a0, 0
+		h = 32
+	}
+	k := uint(bits.LeadingZeros64(a3)) &^ 1
+	a3 = a3<<k | a2>>(64-k)
+	a2 = a2<<k | a1>>(64-k)
+	a1 = a1<<k | a0>>(64-k)
+	a0 <<= k
+	h += k >> 1
+	// the root s1 of <a3, a2> with the remainder r1 <= 2*s1,
+	// then the low limb of the root as q = (r1*2^64 + a1) / (2*s1),
+	// the root step of sqrt128n on 128-bit halves
+	s1, rh, rl := sqrtrem128n(a3, a2)
+	// (r1*2^63 + a1>>1) / s1, nh <= s1 as r1 <= 2*s1
+	nh := rh<<63 | rl>>1
+	nl := rl<<63 | a1>>1
+	var q, u, uh uint64
+	if nh < s1 {
+		// one hardware 128-by-64 division on amd64
+		q, u = bits.Div64(nh, nl, s1)
+	} else {
+		// q = 2^64 for r1 = 2*s1, so q = 2^64-1 and u = n - q*s1 = nl + s1
+		q = math.MaxUint64
+		u, uh = bits.Add64(nl, s1, 0)
+	}
+	// the remainder (2u + bit 0 of a1)*2^64 + a0 - q^2,
+	// negative for a root one too big
+	qh, ql := bits.Mul64(q, q)
+	_, b := bits.Sub64(a0, ql, 0)
+	_, b = bits.Sub64(u<<1|a1&1, qh, b)
+	_, b = bits.Sub64(uh<<1|u>>63, 0, b)
+	q, b = bits.Sub64(q, b, 0)
+	s1 -= b
+	return Uint256{q>>h | s1<<(64-h), s1 >> h, 0, 0}
+}
+
+// Log10 returns log10(x) rounded down, it panics for x == 0
+func (x Uint256) Log10() int {
+	n := x.log10()
+	if n < 0 {
+		panic("fat.Uint256.Log10: non-positive value")
+	}
+	return n
+}
+
+// log10 is Log10 and -1 for x == 0, with no test of its own:
+// 0 takes t = 0 and comes out below 10^0
+func (x Uint256) log10() int {
+	// the half with the top bit by a branch, values tend to one side of 2^128
+	h, l, o := x.L3, x.L2, 257*1233
+	if x.L3|x.L2 == 0 {
+		h, l, o = x.L1, x.L0, 129*1233
+	}
+	// 1233/4096 is just below log10(2),
+	// so x of n bits has t or t+1 digits for t = (n+1)*1233/4096.
+	// The zeros of the low limb count by a mask:
+	// a select of the top limb would stay a branch as it feeds a load address.
+	// Times 1233 ahead of the mask, the two multiplies run side by side
+	z := bits.LeadingZeros64(h)
+	t := (o - z*1233 - bits.LeadingZeros64(l)*1233&-(z>>6)) >> 12
+	p := &pow10x256[t]
+	_, b := bits.Sub64(x.L0, p.L0, 0)
+	_, b = bits.Sub64(x.L1, p.L1, b)
+	_, b = bits.Sub64(x.L2, p.L2, b)
+	_, b = bits.Sub64(x.L3, p.L3, b)
+	return t - int(b)
 }

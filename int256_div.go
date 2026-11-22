@@ -1541,6 +1541,24 @@ func (x Int256) MulMod(y, m Int256) Int256 {
 	return Int256{r0, r1, r2, r3}
 }
 
+// ExpMod returns x^y % m with the sign of x^y, 0^0 is 1.
+// It panics for y < 0 and m == 0
+func (x Int256) ExpMod(y, m Int256) Int256 {
+	if int64(y.L3) < 0 {
+		panic("fat.Int256.ExpMod: negative exponent")
+	}
+	ra, zero := x.UnsignedAbs().expMod(Uint256(y), m.UnsignedAbs())
+	if zero {
+		panic("fat.Int256.ExpMod: division by zero")
+	}
+	r := Int256(ra)
+	// x^y < 0 for x < 0 and y odd; r < |m| <= 2^255, so -r fits
+	if int64(x.L3) < 0 && y.L0&1 != 0 {
+		return r.Neg()
+	}
+	return r
+}
+
 // DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
 // It panics for y == 0
 func (x Int256) DivToFloat64(y Int256) float64 {

@@ -507,7 +507,7 @@ func BenchmarkInt256Convert(b *testing.B) {
 var kI256 = Kind[Int256]{
 	Name: "Int256", Bits: 256, Signed: true,
 	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
-	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64,
+	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64, Small: func(v uint64) Int256 { return NewInt256(int64(v)) },
 	Max: MaxInt256(), Min: MinInt256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowInt256,
@@ -785,6 +785,18 @@ func TestInt256HugeShifts(t *testing.T) { RunHugeShifts(t, kI256) }
 // TestInt256PanicText checks that every panic names its func or method
 func TestInt256PanicText(t *testing.T) { RunPanicText(t, kI256) }
 
+// TestInt256Exp checks Exp, Expo and Expu against big.Int
+func TestInt256Exp(t *testing.T) { RunExp(t, kI256) }
+
+// TestInt256ExpMod checks ExpMod against big.Int
+func TestInt256ExpMod(t *testing.T) { RunExpMod(t, kI256) }
+
+// TestInt256Sqrt checks Sqrt against big.Int at and next to squares
+func TestInt256Sqrt(t *testing.T) { RunSqrt(t, kI256) }
+
+// TestInt256Log10 checks Log10 at every power of ten and bit length
+func TestInt256Log10(t *testing.T) { RunLog10(t, kI256) }
+
 // TestInt256Float checks Float64 and FromFloat64 against big.Float
 func TestInt256Float(t *testing.T) { RunFloat(t, kI256) }
 
@@ -858,6 +870,52 @@ var benchI256 = sync.OnceValue(func() (in struct {
 	in.i256s = b.I256s
 	return
 })
+
+// BenchmarkInt256Pow measures Exp with results that fit, Sqrt and Log10 of |x|.
+// Expu/full takes full-width operands that wrap
+func BenchmarkInt256Pow(b *testing.B) {
+	in := benchI256()
+	l, e := ExpIn(256, true)
+	ex, ey := Slice256[Int256](l), make([]Int256, len(e))
+	for i, v := range e {
+		ey[i] = NewInt256(int64(v))
+	}
+	b.Run("op=Exp", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256 = ex[i&BenchMask].Exp(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expo", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256, SinkBool = ex[i&BenchMask].Expo(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expu", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256 = ex[i&BenchMask].Expu(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expu/full", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].Expu(y[i&BenchMask].Abs())
+		}
+	})
+	a := make([]Int256, len(in.i256))
+	for i, v := range in.i256 {
+		a[i] = v.Abs()
+	}
+	b.Run("op=Sqrt", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256 = a[i&BenchMask].Sqrt()
+		}
+	})
+	b.Run("op=Log10", func(b *testing.B) {
+		for i := range b.N {
+			SinkInt = a[i&BenchMask].Log10()
+		}
+	})
+}
 
 // BenchmarkInt256DivToFloat64 measures DivToFloat64 and DivToFloat64x
 // next to big.Rat.Float64 on the same pairs by bit length.

@@ -1200,3 +1200,78 @@ func (x Int256) Mul64u(y int64) Int256 {
 	r3, _ = bits.Sub64(r3, x.L2&m, c)
 	return Int256{r0, r1, r2, r3}
 }
+
+// --- pow ------------------------------------------------
+
+// Exp returns x^y, 0^0 is 1, it panics for y < 0 and on overflow
+func (x Int256) Exp(y Int256) Int256 {
+	if int64(y.L3) < 0 {
+		panic("fat.Int256.Exp: negative exponent")
+	}
+	r, over := x.expo(y)
+	if over {
+		panic("fat.Int256.Exp: overflow")
+	}
+	return r
+}
+
+// Expo returns Expu and whether x^y overflowed, it panics for y < 0
+func (x Int256) Expo(y Int256) (r Int256, overflow bool) {
+	if int64(y.L3) < 0 {
+		panic("fat.Int256.Expo: negative exponent")
+	}
+	return x.expo(y)
+}
+
+// expo is Expo for y >= 0 only, a negative y gives a wrong result.
+// It is |x|^y with the sign of x for an odd y
+func (x Int256) expo(y Int256) (r Int256, over bool) {
+	a := x.UnsignedAbs()
+	if y.L3|y.L2|y.L1 != 0 || y.L0 >= 256 {
+		a, over = a.Expu(Uint256(y)), a.L3|a.L2|a.L1 != 0 || a.L0 > 1
+	} else {
+		a, over = a.exp(y.L0)
+	}
+	// n is 1 for a negative power, it fits up to 2^255 and a positive one below
+	n := x.L3 >> 63 & y.L0 & 1
+	m := -n
+	_, b := bits.Sub64(^m, a.L0, 0)
+	_, b = bits.Sub64(^m, a.L1, b)
+	_, b = bits.Sub64(^m, a.L2, b)
+	_, b = bits.Sub64(1<<63-1+n, a.L3, b)
+	r0, c := bits.Sub64(a.L0^m, m, 0)
+	r1, c := bits.Sub64(a.L1^m, m, c)
+	r2, c := bits.Sub64(a.L2^m, m, c)
+	r3, _ := bits.Sub64(a.L3^m, m, c)
+	return Int256{r0, r1, r2, r3}, over || b != 0
+}
+
+// Expu returns x^y wrapped around as on a Go integer, 0^0 is 1.
+// It panics for y < 0
+func (x Int256) Expu(y Int256) Int256 {
+	if int64(y.L3) < 0 {
+		panic("fat.Int256.Expu: negative exponent")
+	}
+	return Int256(Uint256(x).Expu(Uint256(y)))
+}
+
+// --- roots ----------------------------------------------
+
+// Sqrt returns the square root of x rounded down, it panics for x < 0
+func (x Int256) Sqrt() Int256 {
+	if int64(x.L3) < 0 {
+		panic("fat.Int256.Sqrt: negative value")
+	}
+	return Int256(Uint256(x).Sqrt())
+}
+
+// Log10 returns log10(x) rounded down, it panics for x <= 0
+func (x Int256) Log10() int {
+	// a negative x stays within the table as a large unsigned one,
+	// then one sign test takes it and the -1 of 0
+	n := Uint256(x).log10()
+	if int64(x.L3)|int64(n) < 0 {
+		panic("fat.Int256.Log10: non-positive value")
+	}
+	return n
+}

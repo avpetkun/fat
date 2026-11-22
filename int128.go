@@ -749,3 +749,74 @@ func (x Int128) Mul64u(y int64) Int128 {
 	r.L1 -= x.L0 & uint64(y>>63)
 	return Int128(r)
 }
+
+// --- pow ------------------------------------------------
+
+// Exp returns x^y, 0^0 is 1, it panics for y < 0 and on overflow
+func (x Int128) Exp(y Int128) Int128 {
+	if int64(y.L1) < 0 {
+		panic("fat.Int128.Exp: negative exponent")
+	}
+	r, over := x.expo(y)
+	if over {
+		panic("fat.Int128.Exp: overflow")
+	}
+	return r
+}
+
+// Expo returns Expu and whether x^y overflowed, it panics for y < 0
+func (x Int128) Expo(y Int128) (r Int128, overflow bool) {
+	if int64(y.L1) < 0 {
+		panic("fat.Int128.Expo: negative exponent")
+	}
+	return x.expo(y)
+}
+
+// expo is Expo for y >= 0 only, a negative y gives a wrong result.
+// It returns |x|^y with the sign of x for an odd y
+func (x Int128) expo(y Int128) (r Int128, over bool) {
+	a := x.UnsignedAbs()
+	if y.L1 != 0 || y.L0 >= 128 {
+		a, over = a.Expu(Uint128(y)), a.L1 != 0 || a.L0 > 1
+	} else {
+		a, over = a.exp(y.L0)
+	}
+	// n is 1 for a negative power: it fits up to 2^127, a positive one below
+	n := x.L1 >> 63 & y.L0 & 1
+	m := -n
+	_, b := bits.Sub64(^m, a.L0, 0)
+	_, b = bits.Sub64(1<<63-1+n, a.L1, b)
+	r0, c := bits.Sub64(a.L0^m, m, 0)
+	r1, _ := bits.Sub64(a.L1^m, m, c)
+	return Int128{r0, r1}, over || b != 0
+}
+
+// Expu returns x^y wrapped around as on a Go integer, 0^0 is 1.
+// It panics for y < 0
+func (x Int128) Expu(y Int128) Int128 {
+	if int64(y.L1) < 0 {
+		panic("fat.Int128.Expu: negative exponent")
+	}
+	return Int128(Uint128(x).Expu(Uint128(y)))
+}
+
+// --- roots ----------------------------------------------
+
+// Sqrt returns the square root of x rounded down, it panics for x < 0
+func (x Int128) Sqrt() Int128 {
+	if int64(x.L1) < 0 {
+		panic("fat.Int128.Sqrt: negative value")
+	}
+	return Int128(Uint128(x).Sqrt())
+}
+
+// Log10 returns log10(x) rounded down, it panics for x <= 0
+func (x Int128) Log10() int {
+	// a negative x stays within the table as a large unsigned one,
+	// then one sign test takes it and the -1 of 0
+	n := Uint128(x).log10()
+	if int64(x.L1)|int64(n) < 0 {
+		panic("fat.Int128.Log10: non-positive value")
+	}
+	return n
+}

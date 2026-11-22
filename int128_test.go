@@ -386,7 +386,7 @@ func benchBigs128(x []Int128) []*big.Int {
 var kI128 = Kind[Int128]{
 	Name: "Int128", Bits: 128, Signed: true,
 	Ref: RefI128, Wrap: WrapI128, Fits: FitsI128,
-	FromBig: MustInt128FromBig, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64,
+	FromBig: MustInt128FromBig, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64, Small: func(v uint64) Int128 { return NewInt128(int64(v)) },
 	Max: MaxInt128(), Min: MinInt128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowInt128,
@@ -627,6 +627,18 @@ func TestInt128HugeShifts(t *testing.T) { RunHugeShifts(t, kI128) }
 // TestInt128PanicText checks that every panic names the method
 func TestInt128PanicText(t *testing.T) { RunPanicText(t, kI128) }
 
+// TestInt128Exp checks Exp, Expo and Expu with big.Int
+func TestInt128Exp(t *testing.T) { RunExp(t, kI128) }
+
+// TestInt128ExpMod checks ExpMod against big.Int
+func TestInt128ExpMod(t *testing.T) { RunExpMod(t, kI128) }
+
+// TestInt128Sqrt checks Sqrt with big.Int at squares and next to them
+func TestInt128Sqrt(t *testing.T) { RunSqrt(t, kI128) }
+
+// TestInt128Log10 checks Log10 at every power of ten and bit length
+func TestInt128Log10(t *testing.T) { RunLog10(t, kI128) }
+
 // TestInt128Float checks Float64 and FromFloat64 with big.Float
 func TestInt128Float(t *testing.T) { RunFloat(t, kI128) }
 
@@ -682,6 +694,53 @@ var benchI128 = sync.OnceValue(func() (in struct {
 	in.i128s = b.I128s
 	return
 })
+
+// BenchmarkInt128Pow measures Exp, Expo, Expu, Sqrt and Log10.
+// Exp, Expo and Expu take powers that fit, Expu/full random pairs.
+// Sqrt and Log10 take |x|
+func BenchmarkInt128Pow(b *testing.B) {
+	in := benchI128()
+	l, e := ExpIn(128, true)
+	ex, ey := Slice128[Int128](Low128(l)), make([]Int128, len(e))
+	for i, v := range e {
+		ey[i] = NewInt128(int64(v))
+	}
+	b.Run("op=Exp", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128 = ex[i&BenchMask].Exp(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expo", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128, SinkBool = ex[i&BenchMask].Expo(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expu", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128 = ex[i&BenchMask].Expu(ey[i&BenchMask])
+		}
+	})
+	b.Run("op=Expu/full", func(b *testing.B) {
+		x, y := in.i128, in.j128
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].Expu(y[i&BenchMask].Abs())
+		}
+	})
+	a := make([]Int128, len(in.i128))
+	for i, v := range in.i128 {
+		a[i] = v.Abs()
+	}
+	b.Run("op=Sqrt", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128 = a[i&BenchMask].Sqrt()
+		}
+	})
+	b.Run("op=Log10", func(b *testing.B) {
+		for i := range b.N {
+			SinkInt = a[i&BenchMask].Log10()
+		}
+	})
+}
 
 // BenchmarkInt128DivToFloat64 measures DivToFloat64 and DivToFloat64x.
 // big.Rat.Float64 of the same pairs is the baseline, compare by /impl

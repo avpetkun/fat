@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+
+	"github.com/avpetkun/fat/internal/arch"
 )
 
 // Uint128 is an unsigned 128-bit integer, L0 is its low limb and L1 the high
@@ -744,4 +746,171 @@ func (x Uint128) Mul64u(y uint64) Uint128 {
 	hi, lo := bits.Mul64(x.L0, y)
 	hi += x.L1 * y
 	return Uint128{lo, hi}
+}
+
+// --- pow ------------------------------------------------
+
+// Exp returns x^y, 0^0 is 1, it panics on overflow
+func (x Uint128) Exp(y Uint128) Uint128 {
+	if y.L1 != 0 || y.L0 >= 128 {
+		// x >= 2 overflows from y = 128 on, 0 and 1 stay
+		if x.L1 != 0 || x.L0 > 1 {
+			panic("fat.Uint128.Exp: overflow")
+		}
+		return x
+	}
+	r, over := x.exp(y.L0)
+	if over {
+		panic("fat.Uint128.Exp: overflow")
+	}
+	return r
+}
+
+// Expo returns Expu and whether x^y overflowed
+func (x Uint128) Expo(y Uint128) (r Uint128, overflow bool) {
+	if y.L1 != 0 || y.L0 >= 128 {
+		return x.Expu(y), x.L1 != 0 || x.L0 > 1
+	}
+	return x.exp(y.L0)
+}
+
+// exp is Expo for n < 128 only, a larger n gives a wrong result.
+// It goes over the bits of n from the low one.
+// The squares x^(2^i) are one chain and the products another,
+// so a step waits for one multiply and not two.
+// A mask picks the square or 1, faster than a branch on a random bit
+func (x Uint128) exp(n uint64) (r Uint128, over bool) {
+	m := -(n & 1)
+	r = Uint128{x.L0&m | 1&^m, x.L1 & m}
+	if n < 2 {
+		return r, false
+	}
+	// x >= 2^(len-1): the power overflows for sure from (len-1)*n = 128 on
+	sure := (x.BitLen()-1)*int(n) >= 128
+	s := x
+	for n >>= 1; n > 1; n >>= 1 {
+		s = s.Mulu(s)
+		m := -(n & 1)
+		r = r.Mulu(Uint128{s.L0&m | 1&^m, s.L1 & m})
+	}
+	// below that the powers up to x^(n/2) fit, as x^n < 2^(128+n).
+	// Only the last square and the product with it can overflow
+	o1 := s.L1 != 0
+	s = s.Mulu(s)
+	r, o2 := r.Mulo(s)
+	return r, sure || o1 || o2
+}
+
+// Expu returns x^y wrapped around as on a Go integer, 0^0 is 1
+func (x Uint128) Expu(y Uint128) Uint128 {
+	if x.L0&1 == 0 {
+		// an even x^y has y factors of 2: zero from y = 128 on
+		if y.L1 != 0 || y.L0 >= 128 {
+			return Uint128{}
+		}
+	} else if y.L1 != 0 || y.L0 >= 1<<32 {
+		return x.expuOdd(y)
+	}
+	// the bits of y from the low one as in exp
+	n := y.L0
+	m := -(n & 1)
+	r := Uint128{x.L0&m | 1&^m, x.L1 & m}
+	s := x
+	for n >>= 1; n != 0; n >>= 1 {
+		s = s.Mulu(s)
+		m := -(n & 1)
+		r = r.Mulu(Uint128{s.L0&m | 1&^m, s.L1 & m})
+	}
+	return r
+}
+
+// expuOdd is Expu for an odd x and y >= 2^32 only, an even x goes wrong.
+// 32 steps over the low bits of y leave x^(2^32) = 1 + c*2^34.
+// Its power Y = y >> 32 is a binomial sum that ends at the cube,
+// as c^4 * 2^136 is past 128 bits: a 128-bit y costs 32 steps
+func (x Uint128) expuOdd(y Uint128) Uint128 {
+	r, s := Uint128{1, 0}, x
+	n := y.L0
+	for range 32 {
+		m := -(n & 1)
+		r = r.Mulu(Uint128{s.L0&m | 1&^m, s.L1 & m})
+		s = s.Mulu(s)
+		n >>= 1
+	}
+	c := Uint128{s.L0>>34 | s.L1<<30, s.L1 >> 34}
+	// Y*c at 2^34
+	t := Uint128{n | y.L1<<32, y.L1 >> 32}.Mulu(c)
+	// C(Y,2)*c^2 at 2^68 and C(Y,3)*c^3 at 2^102, the low limbs are enough.
+	// A product of two consecutive values halves exactly,
+	// and 1/3 is a multiply by the inverse of 3
+	y0 := n | y.L1<<32
+	b2 := y0 * (y0 - 1) >> 1
+	b3 := b2 * (y0 - 2) * 0xAAAAAAAAAAAAAAAB
+	c2 := c.L0 * c.L0
+	return r.Mulu(Uint128{1 + t.L0<<34, t.L0>>30 + t.L1<<34 + b2*c2<<4 + b3*c2*c.L0<<38})
+}
+
+// --- roots ----------------------------------------------
+
+// Sqrt returns the square root of x rounded down
+func (x Uint128) Sqrt() Uint128 {
+	if !arch.IsAmd64 {
+		// amd64 keeps the division-based root below
+		if x.L1 == 0 {
+			// sqrt64 without its zero test: the root of 0 comes out 0
+			k := uint(bits.LeadingZeros64(x.L0)) &^ 1
+			return Uint128{sqrt64n(x.L0<<(k&63)) >> (k >> 1), 0}
+		}
+		// sqrt128n with the limb root of sqrtrem128n written out:
+		// no call and no frame, faster in our benchmarks
+		k := uint(bits.LeadingZeros64(x.L1)) &^ 1
+		a1, a0 := x.L1<<(k&63)|x.L0>>1>>(^k&63), x.L0<<(k&63)
+		y0 := uint64(sqrtInvSeed[a1>>55])
+		a32 := a1 >> 32
+		y, _ := bits.Mul64(y0<<17, 3<<62-1<<34-a32*(y0*y0))
+		s1 := a32 * y >> 31
+		d, _ := bits.Mul64(a1-s1*s1, y)
+		s1 += d
+		// one more when the remainder is past 2*s1, both by conditional moves
+		r1 := a1 - s1*s1
+		if s2, r2 := s1+1, r1-2*s1-1; int64(r2) >= 0 {
+			s1, r1 = s2, r2
+		}
+		n := r1<<31 | a0>>33
+		q := n / (s1 | 1<<31)
+		q -= q >> 32
+		u := n - q*s1
+		_, b := bits.Sub64(u<<33|a0&(1<<33-1), q*q, 0)
+		return Uint128{((s1<<32 | q) - b&((u>>31-1)>>63)) >> (k >> 1), 0}
+	}
+	if x.L1 == 0 {
+		return Uint128{sqrt64(x.L0), 0}
+	}
+	// an even shift puts 1 or 2 bits on top, the root shifts by half of it
+	k := uint(bits.LeadingZeros64(x.L1)) &^ 1
+	return Uint128{sqrt128n(x.L1<<k|x.L0>>(64-k), x.L0<<k) >> (k >> 1), 0}
+}
+
+// Log10 returns log10(x) rounded down, it panics for x == 0
+func (x Uint128) Log10() int {
+	n := x.log10()
+	if n < 0 {
+		panic("fat.Uint128.Log10: non-positive value")
+	}
+	return n
+}
+
+// log10 is Log10 and -1 for x == 0, with no test of its own:
+// 0 takes t = 0 and comes out below 10^0
+func (x Uint128) log10() int {
+	// 1233/4096 is just below log10(2),
+	// so x of n bits has t or t+1 digits for t = (n+1)*1233/4096.
+	// The low zeros count by a mask: a select feeding a load address
+	// would stay a branch
+	z := bits.LeadingZeros64(x.L1)
+	t := (129*1233 - z*1233 - bits.LeadingZeros64(x.L0)*1233&-(z>>6)) >> 12
+	p := pow10x128[t]
+	_, b := bits.Sub64(x.L0, p.L0, 0)
+	_, b = bits.Sub64(x.L1, p.L1, b)
+	return t - int(b)
 }

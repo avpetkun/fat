@@ -1064,6 +1064,318 @@ func (x Uint256) MulMod(y, m Uint256) (r Uint256) {
 	return
 }
 
+// ExpMod returns x^y % m, 0^0 is 1, it panics for m == 0
+func (x Uint256) ExpMod(y, m Uint256) Uint256 {
+	r, zero := x.expMod(y, m)
+	if zero {
+		panic("fat.Uint256.ExpMod: division by zero")
+	}
+	return r
+}
+
+// expMod is ExpMod and true for m == 0, with a zero result
+func (x Uint256) expMod(y, m Uint256) (Uint256, bool) {
+	// m == 1 gives 0, one test for both
+	if m.L1|m.L2|m.L3 == 0 && m.L0 <= 1 {
+		return Uint256{}, m.L0 == 0
+	}
+	if y.IsZero() {
+		return Uint256{L0: 1}, false
+	}
+	b := x
+	if !b.LessThan(m) {
+		_, b, _ = b.divMod(m)
+	}
+	if m.L0&1 == 0 {
+		return expModEven(b, y, m), false
+	}
+	return expModOdd(b, y, m), false
+}
+
+// expModEven is expMod for an even m, y > 0 and b < m by the Chinese
+// remainder theorem on m = 2^k * q with q odd: b^y % q by expModOdd and
+// b^y % 2^k as the low bits of Expu, joined by Garner's formula
+// a + q * ((c - a) / q % 2^k). A window of products reduced by division
+// was twice as slow
+func expModEven(b, y, m Uint256) Uint256 {
+	k := m.TrailingZeros()
+	mask := Uint256{}.Not().Rsh(256 - k)
+	c := b.Expu(y).And(mask)
+	q := m.Rsh(k)
+	// q is odd, so q == 1 by one OR
+	if q.L0^1|q.L1|q.L2|q.L3 == 0 {
+		return c
+	}
+	if !b.LessThan(q) {
+		_, b, _ = b.divMod(q)
+	}
+	a := expModOdd(b, y, q)
+	// 1/q % 2^256 by Newton steps from the 3 right bits of q itself,
+	// each doubles them
+	v := q
+	for range 7 {
+		v = v.Mulu(Uint256{L0: 2}.Subu(q.Mulu(v)))
+	}
+	// a + q*t < q + q*(2^k-1) = m
+	return a.Addu(q.Mulu(c.Subu(a).Mulu(v).And(mask)))
+}
+
+// expModOdd is expMod for an odd m > 1, y > 0 and b < m: Montgomery
+// products on as many limbs as m has, but 3, which take those of 4
+func expModOdd(b, y, m Uint256) Uint256 {
+	if m.L1|m.L2|m.L3 == 0 {
+		return Uint256{L0: expModMont64(b.L0, y, m.L0)}
+	}
+	if m.L2|m.L3 == 0 {
+		return expModMont128(Uint128{b.L0, b.L1}, y, Uint128{m.L0, m.L1}).Uint256()
+	}
+	return expModMont(b, y, m)
+}
+
+// expWindow returns the width of the sliding window for a y of n bits:
+// the 2^(w-1) odd powers of the table pay off from these lengths on
+func expWindow(n int) int {
+	switch {
+	case n > 80:
+		return 4
+	case n > 17:
+		return 3
+	}
+	return 1
+}
+
+// expModMont is expMod for an odd m > 1, y > 0 and b < m by Montgomery
+// products modulo R = 2^256 with a sliding window over y: a square per bit
+// and a product per window, by an odd power of b from a table.
+// It is 2.6 times as fast as the products reduced by mulDivMod at 256 bits
+func expModMont(b, y, m Uint256) Uint256 {
+	mp := montInv(m.L0)
+	// R % m from 2^256 - m, then R^2 % m to take b to R*b % m
+	_, r, _ := Uint256{}.Subu(m).divMod(m)
+	_, r2, _ := r.mulDivMod(r, m)
+	var odd [8]Uint256
+	odd[0] = montMul(b, r2, m, mp)
+	n, w := y.BitLen(), expWindow(y.BitLen())
+	if w > 1 {
+		b2 := montSqr(odd[0], m, mp)
+		for k := 1; k < 1<<(w-1); k++ {
+			odd[k] = montMul(odd[k-1], b2, m, mp)
+		}
+	}
+	// from the top bit of y, which is set, so the first window starts r.
+	// From the low bit the squares and the products overlap as two chains,
+	// but that is 10% slower: the products, not their latency, are the bound
+	started := false
+	for i := n - 1; i >= 0; {
+		if y.Bit(i) == 0 {
+			r = montSqr(r, m, mp)
+			i--
+			continue
+		}
+		// the window of up to w bits from i down to a set bit
+		j := max(i-w+1, 0)
+		for y.Bit(j) == 0 {
+			j++
+		}
+		v := 0
+		for k := i; k >= j; k-- {
+			v = v<<1 | int(y.Bit(k))
+			if started {
+				r = montSqr(r, m, mp)
+			}
+		}
+		if started {
+			r = montMul(r, odd[v>>1], m, mp)
+		} else {
+			r, started = odd[v>>1], true
+		}
+		i = j - 1
+	}
+	// out of the Montgomery form
+	return montMul(r, Uint256{L0: 1}, m, mp)
+}
+
+// montMul returns a * b / 2^256 % m by Montgomery's product: the 512-bit
+// product, then four rounds that each add a multiple of m to clear a limb.
+// The 16 limb products of the first part run in parallel: 11% faster in
+// ExpMod of 256 bits than a reduction that follows each row of b (CIOS).
+// m must be odd and a, b below it, mp = -1/m mod 2^64, else it is wrong
+func montMul(a, b, m Uint256, mp uint64) Uint256 {
+	// the 512-bit product p7..p0 row by row,
+	// each row a chain of the low and one of the high halves
+	h0, p0 := bits.Mul64(a.L0, b.L0)
+	h1, l1 := bits.Mul64(a.L0, b.L1)
+	h2, l2 := bits.Mul64(a.L0, b.L2)
+	h3, l3 := bits.Mul64(a.L0, b.L3)
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c := bits.Add64(h1, l2, c)
+	p3, c := bits.Add64(h2, l3, c)
+	p4 := h3 + c
+	h0, l0 := bits.Mul64(a.L1, b.L0)
+	h1, l1 = bits.Mul64(a.L1, b.L1)
+	h2, l2 = bits.Mul64(a.L1, b.L2)
+	h3, l3 = bits.Mul64(a.L1, b.L3)
+	p1, c = bits.Add64(p1, l0, 0)
+	p2, c = bits.Add64(p2, l1, c)
+	p3, c = bits.Add64(p3, l2, c)
+	p4, c = bits.Add64(p4, l3, c)
+	p5 := c
+	p2, c = bits.Add64(p2, h0, 0)
+	p3, c = bits.Add64(p3, h1, c)
+	p4, c = bits.Add64(p4, h2, c)
+	p5 += h3 + c
+	h0, l0 = bits.Mul64(a.L2, b.L0)
+	h1, l1 = bits.Mul64(a.L2, b.L1)
+	h2, l2 = bits.Mul64(a.L2, b.L2)
+	h3, l3 = bits.Mul64(a.L2, b.L3)
+	p2, c = bits.Add64(p2, l0, 0)
+	p3, c = bits.Add64(p3, l1, c)
+	p4, c = bits.Add64(p4, l2, c)
+	p5, c = bits.Add64(p5, l3, c)
+	p6 := c
+	p3, c = bits.Add64(p3, h0, 0)
+	p4, c = bits.Add64(p4, h1, c)
+	p5, c = bits.Add64(p5, h2, c)
+	p6 += h3 + c
+	h0, l0 = bits.Mul64(a.L3, b.L0)
+	h1, l1 = bits.Mul64(a.L3, b.L1)
+	h2, l2 = bits.Mul64(a.L3, b.L2)
+	h3, l3 = bits.Mul64(a.L3, b.L3)
+	p3, c = bits.Add64(p3, l0, 0)
+	p4, c = bits.Add64(p4, l1, c)
+	p5, c = bits.Add64(p5, l2, c)
+	p6, c = bits.Add64(p6, l3, c)
+	p7 := c
+	p4, c = bits.Add64(p4, h0, 0)
+	p5, c = bits.Add64(p5, h1, c)
+	p6, c = bits.Add64(p6, h2, c)
+	p7 += h3 + c
+	// k carries into the limb above each round. The low half of u*m0 is
+	// -p_i by the choice of u, so only its high half is taken, and the
+	// carry out of the low limb is 1 for p_i != 0
+	var u, k uint64
+	u = p0 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p0))
+	c, p1 = madd(u, m.L1, p1, c)
+	c, p2 = madd(u, m.L2, p2, c)
+	c, p3 = madd(u, m.L3, p3, c)
+	p4, k = bits.Add64(p4, c, 0)
+	u = p1 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p1))
+	c, p2 = madd(u, m.L1, p2, c)
+	c, p3 = madd(u, m.L2, p3, c)
+	c, p4 = madd(u, m.L3, p4, c)
+	p5, k = bits.Add64(p5, c, k)
+	u = p2 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p2))
+	c, p3 = madd(u, m.L1, p3, c)
+	c, p4 = madd(u, m.L2, p4, c)
+	c, p5 = madd(u, m.L3, p5, c)
+	p6, k = bits.Add64(p6, c, k)
+	u = p3 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p3))
+	c, p4 = madd(u, m.L1, p4, c)
+	c, p5 = madd(u, m.L2, p5, c)
+	c, p6 = madd(u, m.L3, p6, c)
+	p7, k = bits.Add64(p7, c, k)
+	// p7..p4 + k*2^256 < 2m: less m unless below it, picked by a mask,
+	// as the subtraction follows no pattern
+	r0, br := bits.Sub64(p4, m.L0, 0)
+	r1, br := bits.Sub64(p5, m.L1, br)
+	r2, br := bits.Sub64(p6, m.L2, br)
+	r3, br := bits.Sub64(p7, m.L3, br)
+	keep := -(br &^ k)
+	return Uint256{r0&^keep | p4&keep, r1&^keep | p5&keep, r2&^keep | p6&keep, r3&^keep | p7&keep}
+}
+
+// montSqr is montMul(a, a, m, mp) with the product of a square:
+// the 6 cross products doubled and the 4 squares of the limbs, 10 limb
+// products for 16; the squares are most of the steps of ExpMod
+func montSqr(a, m Uint256, mp uint64) Uint256 {
+	h01, l01 := bits.Mul64(a.L0, a.L1)
+	h02, l02 := bits.Mul64(a.L0, a.L2)
+	h03, l03 := bits.Mul64(a.L0, a.L3)
+	h12, l12 := bits.Mul64(a.L1, a.L2)
+	h13, l13 := bits.Mul64(a.L1, a.L3)
+	h23, l23 := bits.Mul64(a.L2, a.L3)
+	// the cross sum c6..c1: a0 * a3..a1 at limb 1,
+	// a1 * a3..a2 at limb 3, a2 * a3 at limb 5
+	c2, c := bits.Add64(h01, l02, 0)
+	c3, c := bits.Add64(h02, l03, c)
+	c4 := h03 + c
+	u4, c := bits.Add64(h12, l13, 0)
+	u5 := h13 + c
+	c3, c = bits.Add64(c3, l12, 0)
+	c4, c = bits.Add64(c4, u4, c)
+	c5 := u5 + c
+	c5, c = bits.Add64(c5, l23, 0)
+	c6 := h23 + c
+	// doubled into c7..c1
+	c7 := c6 >> 63
+	c6 = c6<<1 | c5>>63
+	c5 = c5<<1 | c4>>63
+	c4 = c4<<1 | c3>>63
+	c3 = c3<<1 | c2>>63
+	c2 = c2<<1 | l01>>63
+	c1 := l01 << 1
+	// and the squares on the even limbs
+	s0h, p0 := bits.Mul64(a.L0, a.L0)
+	s1h, s1l := bits.Mul64(a.L1, a.L1)
+	s2h, s2l := bits.Mul64(a.L2, a.L2)
+	s3h, s3l := bits.Mul64(a.L3, a.L3)
+	p1, c := bits.Add64(c1, s0h, 0)
+	p2, c := bits.Add64(c2, s1l, c)
+	p3, c := bits.Add64(c3, s1h, c)
+	p4, c := bits.Add64(c4, s2l, c)
+	p5, c := bits.Add64(c5, s2h, c)
+	p6, c := bits.Add64(c6, s3l, c)
+	p7, _ := bits.Add64(c7, s3h, c)
+	// k carries into the limb above each round. The low half of u*m0 is
+	// -p_i by the choice of u, so only its high half is taken, and the
+	// carry out of the low limb is 1 for p_i != 0
+	var u, k uint64
+	u = p0 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p0))
+	c, p1 = madd(u, m.L1, p1, c)
+	c, p2 = madd(u, m.L2, p2, c)
+	c, p3 = madd(u, m.L3, p3, c)
+	p4, k = bits.Add64(p4, c, 0)
+	u = p1 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p1))
+	c, p2 = madd(u, m.L1, p2, c)
+	c, p3 = madd(u, m.L2, p3, c)
+	c, p4 = madd(u, m.L3, p4, c)
+	p5, k = bits.Add64(p5, c, k)
+	u = p2 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p2))
+	c, p3 = madd(u, m.L1, p3, c)
+	c, p4 = madd(u, m.L2, p4, c)
+	c, p5 = madd(u, m.L3, p5, c)
+	p6, k = bits.Add64(p6, c, k)
+	u = p3 * mp
+	c, _ = bits.Mul64(u, m.L0)
+	c += uint64(nonzero(p3))
+	c, p4 = madd(u, m.L1, p4, c)
+	c, p5 = madd(u, m.L2, p5, c)
+	c, p6 = madd(u, m.L3, p6, c)
+	p7, k = bits.Add64(p7, c, k)
+	// p7..p4 + k*2^256 < 2m: less m unless below it, picked by a mask,
+	// as the subtraction follows no pattern
+	r0, br := bits.Sub64(p4, m.L0, 0)
+	r1, br := bits.Sub64(p5, m.L1, br)
+	r2, br := bits.Sub64(p6, m.L2, br)
+	r3, br := bits.Sub64(p7, m.L3, br)
+	keep := -(br &^ k)
+	return Uint256{r0&^keep | p4&keep, r1&^keep | p5&keep, r2&^keep | p6&keep, r3&^keep | p7&keep}
+}
+
 // mulDivMod is MulDivMod with the low bits of the quotient and a status:
 // 1 when the quotient overflowed, 2 for d == 0
 func (x Uint256) mulDivMod(y, d Uint256) (q, r Uint256, st uint) {

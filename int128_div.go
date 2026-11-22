@@ -977,6 +977,24 @@ func (x Int128) MulMod(y, m Int128) Int128 {
 	return Int128{r0, r1}
 }
 
+// ExpMod returns x^y % m with the sign of x^y, 0^0 is 1.
+// It panics for y < 0 and m == 0
+func (x Int128) ExpMod(y, m Int128) Int128 {
+	if int64(y.L1) < 0 {
+		panic("fat.Int128.ExpMod: negative exponent")
+	}
+	ra, zero := x.UnsignedAbs().expMod(Uint128(y), m.UnsignedAbs())
+	if zero {
+		panic("fat.Int128.ExpMod: division by zero")
+	}
+	r := Int128(ra)
+	// x^y < 0 for x < 0 and y odd; r < |m| <= 2^127, so -r fits
+	if int64(x.L1) < 0 && y.L0&1 != 0 {
+		return r.Neg()
+	}
+	return r
+}
+
 // DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
 // It panics for y == 0
 func (x Int128) DivToFloat64(y Int128) float64 {

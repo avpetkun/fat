@@ -129,6 +129,22 @@ func BoolInt(b bool) int {
 	return 0
 }
 
+// ExpIn returns 2^18 bases of 2 to 64 bits and exponents with x^y in w-1 bits.
+// Signed bases get a random sign
+func ExpIn(w int, signed bool) (x [][4]uint64, y []uint64) {
+	r := rand.New(rand.NewSource(3))
+	for range BenchMask + 1 {
+		n := 2 + r.Intn(63)
+		if signed {
+			x = append(x, RandSigned256(r, n))
+		} else {
+			x = append(x, RandBits(r, n))
+		}
+		y = append(y, uint64(r.Intn((w-1)/n+1)))
+	}
+	return
+}
+
 // Low128 returns the low 2 limbs of each value
 func Low128(l [][4]uint64) [][2]uint64 {
 	out := make([][2]uint64, len(l))
