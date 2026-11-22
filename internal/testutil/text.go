@@ -425,6 +425,40 @@ func hexParse[T Num[T]](t *testing.T, k Kind[T]) {
 func bigBases[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 }
 
+// RunFmt checks fmt verbs and flags with big.Int on the values of k.
+// An unknown verb names the type
+func RunFmt[T Num[T]](t *testing.T, k Kind[T]) {
+	t.Parallel()
+	name := "fat." + k.Name
+	var vals []*big.Int
+	k.Values(func(x T) { vals = append(vals, k.Ref(x)) })
+	format := func(layout string, v *big.Int) string { return fmt.Sprintf(layout, k.FromBig(v)) }
+	layouts := []string{
+		"%b", "%o", "%O", "%d", "%s", "%v", "%x", "%X",
+		"%#b", "%#o", "%#O", "%#x", "%#X", "%#d", "%+d", "% d", "%+ d", "% x", "%+X",
+		"%08d", "%-8d|", "%40x", "%-+#40X|", "%0+50b", "%0-30o|", "%.30d", "%.0d", "%.0x", "%#.0x", "%8.3d", "%08.3d", "%+.0d", "%5.0d|",
+	}
+	var sub []*big.Int
+	for i, v := range vals {
+		if i < 100 || i%64 == 0 {
+			sub = append(sub, v)
+		}
+	}
+	for _, v := range sub {
+		for _, l := range layouts {
+			require.Equal(On(t, l, v), fmt.Sprintf(l, v), format(l, v))
+		}
+		// an unknown verb names the type
+		for _, l := range []string{"%q", "%c", "%e"} {
+			require.Equal(On(t, l, v), strings.Replace(fmt.Sprintf(l, v), "big.Int", name, 1), format(l, v))
+		}
+	}
+
+	// a pointer formats too
+	x := k.FromBig(k.Wrap(big.NewInt(-42)))
+	require.Equal(t, fmt.Sprint(k.Ref(x)), fmt.Sprint(&x))
+}
+
 // RunJSON checks the quoted decimal JSON of values and map keys with big.Int.
 // Bare numbers are read too, quoted text as UnmarshalText reads it
 func RunJSON[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {

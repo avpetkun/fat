@@ -791,6 +791,9 @@ func TestInt256MulDiv(t *testing.T) {
 	}
 }
 
+// TestInt256Fmt checks Format against big.Int on the fmt verbs and flags
+func TestInt256Fmt(t *testing.T) { RunFmt(t, kI256) }
+
 // TestInt256ParseErrors checks FromDec on malformed and out of range text
 func TestInt256ParseErrors(t *testing.T) { RunParseErrors(t, kI256) }
 

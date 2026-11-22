@@ -777,6 +777,9 @@ var kU128 = Kind[Uint128]{
 	},
 }
 
+// TestUint128Fmt checks the fmt verbs and flags with big.Int
+func TestUint128Fmt(t *testing.T) { RunFmt(t, kU128) }
+
 // TestUint128ParseErrors checks FromDec on malformed and out of range input
 func TestUint128ParseErrors(t *testing.T) {
 	RunParseErrors(t, kU128)

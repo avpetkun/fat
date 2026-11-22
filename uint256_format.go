@@ -126,6 +126,29 @@ func (x Uint256) PrettyDec(sep byte) string {
 	return prettyDecimal(x.appendDecimal(buf[:0]), false, sep)
 }
 
+var _ fmt.Formatter = (*Uint256)(nil)
+
+// Format writes x as big.Int.Format does: %b, %o, %O, %d, %s, %v, %x and %X
+func (x Uint256) Format(f fmt.State, verb rune) {
+	base := formatBase(verb)
+	if base == 0 {
+		fmt.Fprintf(f, "%%!%c(fat.Uint256=%s)", verb, x.Dec())
+		return
+	}
+	if formatPlain(f, verb) {
+		p := getFmtBuf()
+		b := upperHex(x.appendBase(*p, base), verb)
+		f.Write(b)
+		putFmtBuf(p, b)
+		return
+	}
+	// formatNumber copies the digits into its one write,
+	// so they stay on the stack: 256 bytes for base 2
+	var buf [256]byte
+	// digits only, sign and padding come from the flags
+	formatNumber(f, verb, false, x.appendBase(buf[:0], base))
+}
+
 // parseUint256 parses s with an optional plus in base 10 or 16.
 // Base 16 takes an optional 0x or 0X, base 0 picks either by that prefix.
 // A minus or a second sign fails, any other base parses as 16
@@ -316,9 +339,28 @@ func parseUint256(s []byte, base int) (Uint256, bool) {
 	return uint256FromHex(s)
 }
 
+// appendBase appends x in base 2, 8, 10 or 16, any other base gives base 8
+func (x Uint256) appendBase(dst []byte, base int) []byte {
+	switch base {
+	case 10:
+		return x.appendDecimalSign(dst, false)
+	case 16:
+		return x.appendHexDigits(dst)
+	case 2:
+		return x.appendBinary(dst, false)
+	}
+	return x.appendOctal(dst, false)
+}
+
 // appendDecimal appends decimal x
 func (x Uint256) appendDecimal(dst []byte) []byte {
 	return x.appendDecimalSign(dst, false)
+}
+
+// appendHexDigits appends hex x with no 0x, for Format where the # flag adds it
+func (x Uint256) appendHexDigits(dst []byte) []byte {
+	var buf [67]byte
+	return append(dst, buf[x.putHex(&buf)+2:]...)
 }
 
 // putHex writes hex x at the end of buf after 0x and returns where 0x starts.
@@ -417,6 +459,53 @@ func uint256FromHex(s []byte) (Uint256, bool) {
 		return Uint256{}, false
 	}
 	return Uint256{l0, l1, l2, l3}, true
+}
+
+// appendBinary appends x in base 2, after a minus sign when neg
+func (x Uint256) appendBinary(dst []byte, neg bool) []byte {
+	// one digit for zero
+	nd := x.BitLen()
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	// 8 digits per byte of x from the end, a sign before them
+	var buf [257]byte
+	l := [4]uint64{x.L0, x.L1, x.L2, x.L3}
+	for j := 0; j < (nd+7)>>3; j++ {
+		v := l[j>>3&3] >> (8 * uint(j&7)) & 0xFF
+		// bit 7-i of v alone in byte i, then 0 or 1 there
+		v = (v*0x0101010101010101&0x0102040810204080 + 0x7F7F7F7F7F7F7F7F) >> 7 & 0x0101010101010101
+		binary.LittleEndian.PutUint64(buf[249-8*j&255:], v|0x3030303030303030)
+	}
+	i := 257 - nd
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return append(dst, buf[i:]...)
+}
+
+// appendOctal appends x in base 8, after a minus sign when neg
+func (x Uint256) appendOctal(dst []byte, neg bool) []byte {
+	// one digit for zero
+	nd := (x.BitLen() + 2) / 3
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	// 8 digits per 24 bits of x from the end, a sign before them
+	var buf [89]byte
+	l0, l1, l2, l3 := x.L0, x.L1, x.L2, x.L3
+	for p := 81; p > 80-nd; p -= 8 {
+		v := l0 & 0xFFFFFF
+		l0, l1, l2, l3 = l0>>24|l1<<40, l1>>24|l2<<40, l2>>24|l3<<40, l3>>24
+		// the 3-bit groups apart into bytes, the top one first
+		v = v>>12 | (v&0xFFF)<<32
+		v = v>>6&0x0000003F0000003F | (v&0x0000003F0000003F)<<16
+		v = v>>3&0x0007000700070007 | (v&0x0007000700070007)<<8
+		binary.LittleEndian.PutUint64(buf[p:], v|0x3030303030303030)
+	}
+	i := 89 - nd
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return append(dst, buf[i:]...)
 }
 
 // appendDecimalSign appends decimal x, after a minus sign when neg.

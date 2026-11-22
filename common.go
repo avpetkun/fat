@@ -2,9 +2,11 @@ package fat
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/big"
 	"math/bits"
+	"sync"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -592,6 +594,145 @@ func parseDecimalUint64(s []byte) (uint64, bool) {
 		v = m
 	}
 	return v, true
+}
+
+// --- fmt ------------------------------------------------
+
+// formatBase returns the base of a Format verb, 0 for an unknown verb
+func formatBase(verb rune) int {
+	switch verb {
+	case 'b':
+		return 2
+	case 'o', 'O':
+		return 8
+	case 'd', 's', 'v':
+		return 10
+	case 'x', 'X':
+		return 16
+	}
+	return 0
+}
+
+// formatPlain reports whether verb has no flags, width or precision,
+// so the digits are all Format writes
+func formatPlain(f fmt.State, verb rune) bool {
+	_, width := f.Width()
+	_, precision := f.Precision()
+	return !width && !precision && !f.Flag('+') && !f.Flag(' ') && !f.Flag('#') && verb != 'O'
+}
+
+// upperHex turns the letters of digits to uppercase for %X
+func upperHex(digits []byte, verb rune) []byte {
+	if verb == 'X' {
+		for i, d := range digits {
+			// letters have bit 6 set and digits do not; no branch, they mix
+			digits[i] = d &^ (d >> 1 & 0x20)
+		}
+	}
+	return digits
+}
+
+// fmtBufs holds the output buffers of Format.
+// A slice given to f.Write goes to the heap anyway, and a Writer must not
+// keep it, so pooling saves an allocation per call in our benchmarks
+var fmtBufs = sync.Pool{New: func() any { return new([]byte) }}
+
+// getFmtBuf takes an empty buffer from fmtBufs
+func getFmtBuf() *[]byte { return fmtBufs.Get().(*[]byte) }
+
+// putFmtBuf returns b to fmtBufs in p, a buffer over 1 KB is dropped
+func putFmtBuf(p *[]byte, b []byte) {
+	if cap(b) <= 1024 {
+		*p = b[:0]
+		fmtBufs.Put(p)
+	}
+}
+
+// formatNumber writes the magnitude digits with what the flags of f add,
+// as big.Int.Format does.
+// A sign: '-', or '+' or ' ' by the flags.
+// A prefix: 0b, 0, 0x or 0X by '#', and 0o for %O.
+// At least precision digits, and at least width bytes: spaces on the left,
+// on the right after '-', or zeros after the prefix by '0' and no precision.
+// A zero with precision 0 writes nothing, width included
+func formatNumber(f fmt.State, verb rune, neg bool, digits []byte) {
+	prec, hasPrec := f.Precision()
+	if hasPrec && prec == 0 && len(digits) == 1 && digits[0] == '0' {
+		return
+	}
+	// sign and prefix, 3 bytes at most
+	var head [3]byte
+	n := 0
+	if neg || f.Flag('+') || f.Flag(' ') {
+		head[0] = '-'
+		if !neg {
+			// '+' wins over ' '
+			head[0] = ' '
+			if f.Flag('+') {
+				head[0] = '+'
+			}
+		}
+		n = 1
+	}
+	if verb == 'O' || f.Flag('#') && verb != 'd' && verb != 's' && verb != 'v' {
+		head[n] = '0'
+		n++
+		switch verb {
+		case 'b', 'x', 'X':
+			head[n] = byte(verb)
+			n++
+		case 'O':
+			head[n] = 'o'
+			n++
+		}
+	}
+	zeros := 0
+	if hasPrec && prec > len(digits) {
+		zeros = prec - len(digits)
+	}
+	left, right := 0, 0
+	if width, ok := f.Width(); ok {
+		if pad := width - n - zeros - len(digits); pad > 0 {
+			switch {
+			case f.Flag('-'):
+				right = pad
+			case f.Flag('0') && !hasPrec:
+				zeros += pad
+			default:
+				left = pad
+			}
+		}
+	}
+	// the whole output in one pooled slice of its size for one write
+	p := getFmtBuf()
+	size := left + n + zeros + len(digits) + right
+	out := *p
+	if cap(out) < size {
+		out = make([]byte, size)
+	}
+	out = out[:size]
+	i := 0
+	for ; i < left; i++ {
+		out[i] = ' '
+	}
+	i += copy(out[i:], head[:n])
+	for end := i + zeros; i < end; i++ {
+		out[i] = '0'
+	}
+	if verb == 'X' {
+		// uppercase on the way, letters have bit 6 set and digits do not
+		for _, d := range digits {
+			out[i] = d &^ (d >> 1 & 0x20)
+			i++
+		}
+	} else {
+		i += copy(out[i:], digits)
+	}
+	for ; i < len(out); i++ {
+		out[i] = ' '
+	}
+	f.Write(out)
+	putFmtBuf(p, out)
 }
 
 // --- roots ----------------------------------------------

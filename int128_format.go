@@ -122,6 +122,38 @@ func (x Int128) PrettyDec(sep byte) string {
 	return prettyDecimal(x.UnsignedAbs().appendDecimal(buf[:0]), x.IsNegative(), sep)
 }
 
+var _ fmt.Formatter = (*Int128)(nil)
+
+// Format writes x as big.Int.Format does: %b, %o, %O, %d, %s, %v, %x and %X
+func (x Int128) Format(f fmt.State, verb rune) {
+	base := formatBase(verb)
+	if base == 0 {
+		fmt.Fprintf(f, "%%!%c(fat.Int128=%s)", verb, x.Dec())
+		return
+	}
+	if formatPlain(f, verb) {
+		p := getFmtBuf()
+		b := upperHex(x.appendBase(*p, base), verb)
+		f.Write(b)
+		putFmtBuf(p, b)
+		return
+	}
+	// formatNumber copies the digits into its write, so they stay on the stack
+	var buf [136]byte
+	// the digits of |x| alone, right for MinInt128 too.
+	// formatNumber adds the sign and padding
+	var d []byte
+	switch a := x.UnsignedAbs(); base {
+	case 2:
+		d = appendBin128(buf[:0], a, 0)
+	case 8:
+		d = appendOct128(buf[:0], a, 0)
+	default:
+		d = a.appendBase(buf[:0], base)
+	}
+	formatNumber(f, verb, x.IsNegative(), d)
+}
+
 // parseInt128 parses s with an optional sign in base 10 or 16.
 // Base 16 takes s with or without 0x or 0X, base 0 picks either by that prefix.
 // Any other base is taken as 10
@@ -319,6 +351,23 @@ func parseInt128(s []byte, base int) (Int128, bool) {
 	return Int128{r0, r1}, true
 }
 
+// appendBase appends x in base 2, 8, 10 or 16 for Format.
+// Any other base writes base 8
+func (x Int128) appendBase(dst []byte, base int) []byte {
+	switch base {
+	case 10:
+		return x.appendDecimal(dst)
+	case 16:
+		if int64(x.L1) < 0 {
+			dst = append(dst, '-')
+		}
+		return x.UnsignedAbs().appendHexDigits(dst)
+	case 2:
+		return appendBin128(dst, x.UnsignedAbs(), x.L1>>63)
+	}
+	return appendOct128(dst, x.UnsignedAbs(), x.L1>>63)
+}
+
 // putHex writes x as Hex at the end of buf and returns where it starts.
 // It is Uint128.putHex on |x| written out, a call less
 func (x Int128) putHex(buf *[35]byte) int {
@@ -335,6 +384,56 @@ func (x Int128) putHex(buf *[35]byte) int {
 	// after the digit stores, which would write leading zeros over it
 	buf[z], buf[z+1], buf[z+2] = '-', '0', 'x'
 	return 1 + z - int(x.L1>>63)
+}
+
+// appendBin128 appends u in base 2, a minus first when neg is 1.
+// neg must be 0 or 1, other values give a wrong result or a bounds panic
+func appendBin128(dst []byte, u Uint128, neg uint64) []byte {
+	var buf [129]byte
+	for j := range 8 {
+		binary.BigEndian.PutUint64(buf[121-8*j:], bin8(u.L0>>(8*j)))
+		binary.BigEndian.PutUint64(buf[57-8*j:], bin8(u.L1>>(8*j)))
+	}
+	nd := u.BitLen()
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	i := 129 - nd
+	buf[i-1] = '-'
+	i -= int(neg)
+	return append(dst, buf[i:]...)
+}
+
+// bin8 spreads the low 8 bits of x into 8 binary digits, first digit on top
+func bin8(x uint64) uint64 {
+	// byte k keeps bit k, then 0x80 or less turns into 1 or 0
+	x = (x & 0xFF) * 0x0101010101010101 & 0x8040201008040201
+	return (x+0x7F7F7F7F7F7F7F7F)>>7&0x0101010101010101 | 0x3030303030303030
+}
+
+// appendOct128 appends u in base 8, a minus first when neg is 1.
+// neg must be 0 or 1, other values give a wrong result or a bounds panic
+func appendOct128(dst []byte, u Uint128, neg uint64) []byte {
+	// 8 digits per 24 bits, 48 digits cover 128 bits
+	var buf [49]byte
+	binary.BigEndian.PutUint64(buf[1:], oct8(u.L1>>56))
+	binary.BigEndian.PutUint64(buf[9:], oct8(u.L1>>32))
+	binary.BigEndian.PutUint64(buf[17:], oct8(u.L1>>8))
+	binary.BigEndian.PutUint64(buf[25:], oct8(u.L0>>48|u.L1<<16))
+	binary.BigEndian.PutUint64(buf[33:], oct8(u.L0>>24))
+	binary.BigEndian.PutUint64(buf[41:], oct8(u.L0))
+	nd := (u.BitLen() + 2) / 3
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	i := 49 - nd
+	buf[i-1] = '-'
+	i -= int(neg)
+	return append(dst, buf[i:]...)
+}
+
+// oct8 spreads the low 24 bits of x into 8 octal digits, first digit on top
+func oct8(x uint64) uint64 {
+	x = (x&0xFFFFFF | x&0xFFFFFF<<20) & 0x00000FFF00000FFF
+	x = (x | x<<10) & 0x003F003F003F003F
+	x = (x | x<<5) & 0x0707070707070707
+	return x | 0x3030303030303030
 }
 
 // appendDecimal appends decimal x

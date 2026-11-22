@@ -111,6 +111,29 @@ func (x Int256) PrettyDec(sep byte) string {
 	return prettyDecimal(x.UnsignedAbs().AppendDec(buf[:0]), x.IsNegative(), sep)
 }
 
+var _ fmt.Formatter = (*Int256)(nil)
+
+// Format writes x as big.Int.Format does: %b, %o, %O, %d, %s, %v, %x and %X
+func (x Int256) Format(f fmt.State, verb rune) {
+	base := formatBase(verb)
+	if base == 0 {
+		fmt.Fprintf(f, "%%!%c(fat.Int256=%s)", verb, x.Dec())
+		return
+	}
+	if formatPlain(f, verb) {
+		p := getFmtBuf()
+		b := upperHex(x.appendBase(*p, base), verb)
+		f.Write(b)
+		putFmtBuf(p, b)
+		return
+	}
+	// formatNumber copies the digits into its write, so they stay on the stack.
+	// Base 2 takes 256 bytes
+	var buf [256]byte
+	// digits of |x| only, right for MinInt256 too, the flags add the rest
+	formatNumber(f, verb, x.IsNegative(), x.UnsignedAbs().appendBase(buf[:0], base))
+}
+
 // putHex writes Hex to the end of buf and returns the index it starts at.
 // It is Uint256.putHex on |x| written out, a call less
 func (x Int256) putHex(buf *[67]byte) int {
@@ -137,6 +160,22 @@ func (x Int256) putHex(buf *[67]byte) int {
 	i := 64 - nd
 	buf[i], buf[i+1], buf[i+2] = '-', '0', 'x'
 	return i + 1 - int(x.L3>>63)
+}
+
+// appendBase appends x in base 2, 8, 10 or 16, any other base gives base 8
+func (x Int256) appendBase(dst []byte, base int) []byte {
+	switch base {
+	case 10:
+		return x.appendDecimal(dst)
+	case 16:
+		if int64(x.L3) < 0 {
+			dst = append(dst, '-')
+		}
+		return x.UnsignedAbs().appendHexDigits(dst)
+	case 2:
+		return x.UnsignedAbs().appendBinary(dst, int64(x.L3) < 0)
+	}
+	return x.UnsignedAbs().appendOctal(dst, int64(x.L3) < 0)
 }
 
 // appendDecimal appends decimal x

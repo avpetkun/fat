@@ -971,6 +971,9 @@ var kU256 = Kind[Uint256]{
 	},
 }
 
+// TestUint256Fmt checks Format against big.Int on the fmt verbs and flags
+func TestUint256Fmt(t *testing.T) { RunFmt(t, kU256) }
+
 // TestUint256ParseErrors checks FromDec on malformed and out of range text
 func TestUint256ParseErrors(t *testing.T) { RunParseErrors(t, kU256) }
 

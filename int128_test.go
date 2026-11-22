@@ -627,6 +627,9 @@ func TestInt128MulDiv(t *testing.T) {
 	}
 }
 
+// TestInt128Fmt checks the fmt verbs and flags with big.Int
+func TestInt128Fmt(t *testing.T) { RunFmt(t, kI128) }
+
 // TestInt128ParseErrors checks FromDec on malformed and out of range input
 func TestInt128ParseErrors(t *testing.T) { RunParseErrors(t, kI128) }
 

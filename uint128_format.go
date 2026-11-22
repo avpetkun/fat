@@ -172,6 +172,29 @@ func (x Uint128) PrettyDec(sep byte) string {
 	return prettyDecimal(x.appendDecimal(buf[:0]), false, sep)
 }
 
+var _ fmt.Formatter = (*Uint128)(nil)
+
+// Format writes x as big.Int.Format does: %b, %o, %O, %d, %s, %v, %x and %X
+func (x Uint128) Format(f fmt.State, verb rune) {
+	base := formatBase(verb)
+	if base == 0 {
+		fmt.Fprintf(f, "%%!%c(fat.Uint128=%s)", verb, x.Dec())
+		return
+	}
+	if formatPlain(f, verb) {
+		p := getFmtBuf()
+		b := upperHex(x.appendBase(*p, base), verb)
+		f.Write(b)
+		putFmtBuf(p, b)
+		return
+	}
+	// formatNumber copies the digits into one write, they stay on the stack.
+	// 128 bytes hold base 2
+	var buf [128]byte
+	// digits only, sign and padding come from the flags
+	formatNumber(f, verb, false, x.appendBase(buf[:0], base))
+}
+
 // parseUint128 parses s with an optional plus in base 10 or 16.
 // Base 16 takes an optional 0x or 0X, base 0 picks either by that prefix.
 // A minus or a second sign fails, any other base parses as 16
@@ -330,6 +353,19 @@ func parseUint128(s []byte, base int) (Uint128, bool) {
 	return Uint128{l0, l1}, true
 }
 
+// appendBase appends x in base 2, 8, 10 or 16, any other base gives base 8
+func (x Uint128) appendBase(dst []byte, base int) []byte {
+	switch base {
+	case 10:
+		return x.appendDecimal(dst)
+	case 16:
+		return x.appendHexDigits(dst)
+	case 2:
+		return x.appendBinary(dst)
+	}
+	return x.appendOctal(dst)
+}
+
 // appendDecimal appends decimal x, one limb goes to the 64-bit writer
 func (x Uint128) appendDecimal(dst []byte) []byte {
 	if x.L1 == 0 {
@@ -384,6 +420,12 @@ func (x Uint128) appendDecimal(dst []byte) []byte {
 	return dst
 }
 
+// appendHexDigits appends hex x with no 0x, for Format where the # flag adds it
+func (x Uint128) appendHexDigits(dst []byte) []byte {
+	var buf [35]byte
+	return append(dst, buf[x.putHex(&buf)+2:]...)
+}
+
 // putHex writes hex x at the end of buf after 0x and returns where 0x starts
 func (x Uint128) putHex(buf *[35]byte) int {
 	// z leading zero chars of the 32, one digit stays for zero
@@ -419,4 +461,42 @@ func div1e19Mask(uh, ul uint64) (q, r uint64) {
 		r -= decimalChunk
 	}
 	return qh, r
+}
+
+// appendBinary appends x in base 2
+func (x Uint128) appendBinary(dst []byte) []byte {
+	// one digit for zero
+	nd := x.BitLen()
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	// 8 digits per byte of x from the end
+	var buf [129]byte
+	l0, l1 := x.L0, x.L1
+	for p := 121; p > 121-nd; p -= 8 {
+		v := l0 & 0xFF
+		l0, l1 = l0>>8|l1<<56, l1>>8
+		// bit 7-i of v alone in byte i, then 0 or 1 there
+		v = (v*0x0101010101010101&0x0102040810204080 + 0x7F7F7F7F7F7F7F7F) >> 7 & 0x0101010101010101
+		binary.LittleEndian.PutUint64(buf[p:], v|0x3030303030303030)
+	}
+	return append(dst, buf[129-nd:]...)
+}
+
+// appendOctal appends x in base 8
+func (x Uint128) appendOctal(dst []byte) []byte {
+	// one digit for zero
+	nd := (x.BitLen() + 2) / 3
+	nd += int(uint(nd-1) >> (bits.UintSize - 1))
+	// 8 digits per 24 bits of x from the end
+	var buf [49]byte
+	l0, l1 := x.L0, x.L1
+	for p := 41; p > 41-nd; p -= 8 {
+		v := l0 & 0xFFFFFF
+		l0, l1 = l0>>24|l1<<40, l1>>24
+		// the 3-bit groups apart into bytes, the top one first
+		v = v>>12 | (v&0xFFF)<<32
+		v = v>>6&0x0000003F0000003F | (v&0x0000003F0000003F)<<16
+		v = v>>3&0x0007000700070007 | (v&0x0007000700070007)<<8
+		binary.LittleEndian.PutUint64(buf[p:], v|0x3030303030303030)
+	}
+	return append(dst, buf[49-nd:]...)
 }
