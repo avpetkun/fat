@@ -13,6 +13,8 @@
 - Calls chain into one expression: `x.Mul(y).Add(z).Div64(100)`, with no result variable to prepare.
 - Fits the EVM: the wrapping forms with `AddMod`, `MulMod`, `ExpMod` and `ExtendSign` for its arithmetic, 256-bit words as 32 big-endian bytes, `Bytes20` for addresses and `0x` hex.
 
+## Installation
+
 ```sh
 go get github.com/avpetkun/fat
 ```
