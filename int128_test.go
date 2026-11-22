@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"math/big"
+	"math/rand"
 	"sync"
 	"testing"
 
@@ -499,7 +500,7 @@ func BenchmarkInt128Convert(b *testing.B) {
 var kI128 = Kind[Int128]{
 	Name: "Int128", Bits: 128, Signed: true,
 	Ref: RefI128, Wrap: WrapI128, Fits: FitsI128,
-	FromBig: MustInt128FromBig, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64, Small: func(v uint64) Int128 { return NewInt128(int64(v)) },
+	FromBig: MustInt128FromBig, FromBytes: Int128FromBytes, MustFromBytes: MustInt128FromBytes, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64, Small: func(v uint64) Int128 { return NewInt128(int64(v)) },
 	FromDec: Int128FromDec, FromHex: Int128FromHex, MustFromDec: MustInt128FromDec, MustFromHex: MustInt128FromHex,
 	Dirty: Int128{7, 7}, Max: MaxInt128(), Min: MinInt128(),
 	Values: Values128, Pairs: Pairs128,
@@ -776,6 +777,12 @@ func TestInt128Sqrt(t *testing.T) { RunSqrt(t, kI128) }
 // TestInt128Log10 checks Log10 at every power of ten and bit length
 func TestInt128Log10(t *testing.T) { RunLog10(t, kI128) }
 
+// TestInt128Bytes checks the byte API with big.Int
+func TestInt128Bytes(t *testing.T) { RunBytes(t, kI128) }
+
+// TestInt128Bytes16 checks Bytes16 and PutBytes16 with big.Int
+func TestInt128Bytes16(t *testing.T) { RunBytes16(t, kI128) }
+
 // TestInt128Float checks Float64 and FromFloat64 with big.Float
 func TestInt128Float(t *testing.T) { RunFloat(t, kI128) }
 
@@ -875,6 +882,89 @@ func BenchmarkInt128Pow(b *testing.B) {
 	b.Run("op=Log10", func(b *testing.B) {
 		for i := range b.N {
 			SinkInt = a[i&BenchMask].Log10()
+		}
+	})
+}
+
+// BenchmarkInt128Bytes measures the byte API on random values and indexes
+func BenchmarkInt128Bytes(b *testing.B) {
+	x := benchI128().i128
+	r := rand.New(rand.NewSource(4))
+	idx, ext := make([]int, len(x)), make([]int, len(x))
+	enc, word := make([][]byte, len(x)), make([][]byte, len(x))
+	for i, v := range x {
+		idx[i], ext[i] = r.Intn(16), r.Intn(16-1)
+		enc[i] = v.Bytes()
+		w := v.Bytes32()
+		word[i] = w[16:]
+	}
+	b.Run("op=ByteLen", func(b *testing.B) {
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].ByteLen()
+		}
+	})
+	b.Run("op=Byte", func(b *testing.B) {
+		for i := range b.N {
+			SinkByte = x[i&BenchMask].Byte(idx[i&BenchMask])
+		}
+	})
+	b.Run("op=ExtendSign", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128 = x[i&BenchMask].ExtendSign(ext[i&BenchMask])
+		}
+	})
+	b.Run("op=Bytes32", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes32 = x[i&BenchMask].Bytes32()
+		}
+	})
+	b.Run("op=Bytes20", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes20 = x[i&BenchMask].Bytes20()
+		}
+	})
+	b.Run("op=PutBytes32", func(b *testing.B) {
+		w := SinkBytes32[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes32(w)
+		}
+	})
+	b.Run("op=PutBytes20", func(b *testing.B) {
+		w := SinkBytes20[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes20(w)
+		}
+	})
+	b.Run("op=Bytes16", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes16 = x[i&BenchMask].Bytes16()
+		}
+	})
+	b.Run("op=PutBytes16", func(b *testing.B) {
+		w := SinkBytes16[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes16(w)
+		}
+	})
+	b.Run("op=Bytes", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].Bytes()
+		}
+	})
+	b.Run("op=AppendBytes", func(b *testing.B) {
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].AppendBytes(buf)
+		}
+	})
+	b.Run("op=FromBytes", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128, SinkBool = Int128FromBytes(enc[i&BenchMask])
+		}
+	})
+	b.Run("op=FromBytes/full", func(b *testing.B) {
+		for i := range b.N {
+			sinkI128, SinkBool = Int128FromBytes(word[i&BenchMask])
 		}
 	})
 }

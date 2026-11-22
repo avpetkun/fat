@@ -37,6 +37,15 @@ type Num[T any] interface {
 	ExpMod(y, m T) T
 	Sqrt() T
 	Log10() int
+	ByteLen() int
+	Byte(i int) byte
+	ExtendSign(b int) T
+	Bytes32() [32]byte
+	Bytes20() [20]byte
+	PutBytes32(dst []byte)
+	PutBytes20(dst []byte)
+	Bytes() []byte
+	AppendBytes(dst []byte) []byte
 	Float64() float64
 	DivToFloat64(y T) float64
 	DivToFloat64x(y T) (float64, bool)
@@ -75,6 +84,9 @@ type Kind[T Num[T]] struct {
 	Wrap    func(*big.Int) *big.Int
 	Fits    func(*big.Int) bool
 	FromBig func(*big.Int) T
+	// FromBytes reads big-endian bytes, two's complement for a signed type
+	FromBytes     func([]byte) (T, bool)
+	MustFromBytes func([]byte) T
 	// FromFloat64 truncates toward zero
 	FromFloat64     func(float64) (T, bool)
 	MustFromFloat64 func(float64) T

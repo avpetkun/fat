@@ -643,7 +643,7 @@ func BenchmarkInt256Binary(b *testing.B) {
 var kI256 = Kind[Int256]{
 	Name: "Int256", Bits: 256, Signed: true,
 	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
-	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64, Small: func(v uint64) Int256 { return NewInt256(int64(v)) },
+	FromBig: MustInt256FromBig, FromBytes: Int256FromBytes, MustFromBytes: MustInt256FromBytes, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64, Small: func(v uint64) Int256 { return NewInt256(int64(v)) },
 	FromDec: Int256FromDec, FromHex: Int256FromHex, MustFromDec: MustInt256FromDec, MustFromHex: MustInt256FromHex,
 	Dirty: Int256{7, 7, 7, 7}, Max: MaxInt256(), Min: MinInt256(),
 	Values: Values256, Pairs: Pairs256,
@@ -957,6 +957,9 @@ func TestInt256Sqrt(t *testing.T) { RunSqrt(t, kI256) }
 // TestInt256Log10 checks Log10 at every power of ten and bit length
 func TestInt256Log10(t *testing.T) { RunLog10(t, kI256) }
 
+// TestInt256Bytes checks the byte methods and FromBytes against big.Int
+func TestInt256Bytes(t *testing.T) { RunBytes(t, kI256) }
+
 // TestInt256Float checks Float64 and FromFloat64 against big.Float
 func TestInt256Float(t *testing.T) { RunFloat(t, kI256) }
 
@@ -1082,6 +1085,78 @@ func BenchmarkInt256Pow(b *testing.B) {
 	b.Run("op=Log10", func(b *testing.B) {
 		for i := range b.N {
 			SinkInt = a[i&BenchMask].Log10()
+		}
+	})
+}
+
+// BenchmarkInt256Bytes measures the byte methods and FromBytes
+func BenchmarkInt256Bytes(b *testing.B) {
+	x := benchI256().i256
+	r := rand.New(rand.NewSource(4))
+	idx, ext := make([]int, len(x)), make([]int, len(x))
+	enc, word := make([][]byte, len(x)), make([][]byte, len(x))
+	for i, v := range x {
+		idx[i], ext[i] = r.Intn(32), r.Intn(32-1)
+		enc[i] = v.Bytes()
+		w := v.Bytes32()
+		word[i] = w[:]
+	}
+	b.Run("op=ByteLen", func(b *testing.B) {
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].ByteLen()
+		}
+	})
+	b.Run("op=Byte", func(b *testing.B) {
+		for i := range b.N {
+			SinkByte = x[i&BenchMask].Byte(idx[i&BenchMask])
+		}
+	})
+	b.Run("op=ExtendSign", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256 = x[i&BenchMask].ExtendSign(ext[i&BenchMask])
+		}
+	})
+	b.Run("op=Bytes32", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes32 = x[i&BenchMask].Bytes32()
+		}
+	})
+	b.Run("op=Bytes20", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes20 = x[i&BenchMask].Bytes20()
+		}
+	})
+	b.Run("op=PutBytes32", func(b *testing.B) {
+		w := SinkBytes32[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes32(w)
+		}
+	})
+	b.Run("op=PutBytes20", func(b *testing.B) {
+		w := SinkBytes20[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes20(w)
+		}
+	})
+	b.Run("op=Bytes", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].Bytes()
+		}
+	})
+	b.Run("op=AppendBytes", func(b *testing.B) {
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].AppendBytes(buf)
+		}
+	})
+	b.Run("op=FromBytes", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256, SinkBool = Int256FromBytes(enc[i&BenchMask])
+		}
+	})
+	b.Run("op=FromBytes/full", func(b *testing.B) {
+		for i := range b.N {
+			sinkI256, SinkBool = Int256FromBytes(word[i&BenchMask])
 		}
 	})
 }

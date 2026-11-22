@@ -38,6 +38,32 @@ func MustUint128FromBig(v *big.Int) Uint128 {
 	return x
 }
 
+// Uint128FromBytes reads big-endian b and whether it fits, zero if not
+func Uint128FromBytes(b []byte) (Uint128, bool) {
+	if n := len(b); n >= 16 {
+		var or byte
+		for _, c := range b[:n-16] {
+			or |= c
+		}
+		if or != 0 {
+			return Uint128{}, false
+		}
+		// the full width in the branch on the length, with no test of its own
+		b = b[n-16:]
+		return Uint128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}, true
+	}
+	return uint128FromBytes(b), true
+}
+
+// MustUint128FromBytes is Uint128FromBytes that panics when b does not fit
+func MustUint128FromBytes(b []byte) Uint128 {
+	x, ok := Uint128FromBytes(b)
+	if !ok {
+		panic("fat.MustUint128FromBytes: out of range")
+	}
+	return x
+}
+
 // Uint128FromFloat64 returns v truncated toward zero and whether it fits.
 // It returns zero and false for a NaN, for v <= -1 and for v >= 2^128
 func Uint128FromFloat64(v float64) (Uint128, bool) {
@@ -318,6 +344,149 @@ func (x *Uint128) GobDecode(b []byte) error {
 	}
 	*x = Uint128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}
 	return nil
+}
+
+// --- bytes ----------------------------------------------
+
+// ByteLen returns the length of Bytes
+func (x Uint128) ByteLen() int {
+	return (x.BitLen() + 7) >> 3
+}
+
+// Byte returns byte i of the 16 big-endian bytes of x, 0 for i >= 16.
+// It panics for i < 0
+func (x Uint128) Byte(i int) byte {
+	if uint(i) >= 16 {
+		if i < 0 {
+			panic("fat.Uint128.Byte: negative index")
+		}
+		return 0
+	}
+	// the bit offset of the byte, the limb by a conditional move
+	s := uint(15-i) * 8
+	v := x.L0
+	if s >= 64 {
+		v = x.L1
+	}
+	return byte(v >> (s & 63))
+}
+
+// ExtendSign returns x sign-extended from byte b, counted from the low end.
+// It returns x for b >= 15 and panics for b < 0
+func (x Uint128) ExtendSign(b int) Uint128 {
+	if uint(b) >= 15 {
+		if b < 0 {
+			panic("fat.Uint128.ExtendSign: negative index")
+		}
+		return x
+	}
+	// the sign bit goes to the top of its limb and back down: no masks,
+	// the body inlines, faster than masks in our benchmarks
+	k := uint(^b&7) * 8
+	lo := uint64(int64(x.L0<<k) >> k)
+	hi := uint64(int64(lo) >> 63)
+	if b >= 8 {
+		lo, hi = x.L0, uint64(int64(x.L1<<k)>>k)
+	}
+	return Uint128{lo, hi}
+}
+
+// Bytes32 returns x as 32 bytes big-endian
+func (x Uint128) Bytes32() (b [32]byte) {
+	binary.BigEndian.PutUint64(b[16:], x.L1)
+	binary.BigEndian.PutUint64(b[24:], x.L0)
+	return
+}
+
+// Bytes20 returns the low 20 bytes of Bytes32
+func (x Uint128) Bytes20() (b [20]byte) {
+	// a copy of the result loads bytes 0 to 16 and 12 to 20.
+	// On Graviton a load forwards only from a store at its offset 0 or middle:
+	// stores at 0, 8 and 16 serve both loads, those at 4 and 12 neither.
+	// PutUint64 of x.L1>>32 would split into a zero and a 4-byte store
+	binary.LittleEndian.PutUint64(b[:], bits.ReverseBytes64(x.L1>>32))
+	binary.BigEndian.PutUint64(b[8:], x.L1<<32|x.L0>>32)
+	binary.BigEndian.PutUint32(b[16:], uint32(x.L0))
+	return
+}
+
+// Bytes16 returns x as 16 big-endian bytes
+func (x Uint128) Bytes16() (b [16]byte) {
+	binary.BigEndian.PutUint64(b[:], x.L1)
+	binary.BigEndian.PutUint64(b[8:], x.L0)
+	return
+}
+
+// PutBytes32 writes Bytes32 to dst[:32], it panics when len(dst) < 32
+func (x Uint128) PutBytes32(dst []byte) {
+	if len(dst) < 32 {
+		panic("fat.Uint128.PutBytes32: short buffer")
+	}
+	binary.BigEndian.PutUint64(dst, 0)
+	binary.BigEndian.PutUint64(dst[8:], 0)
+	binary.BigEndian.PutUint64(dst[16:], x.L1)
+	binary.BigEndian.PutUint64(dst[24:], x.L0)
+}
+
+// PutBytes20 writes Bytes20 to dst[:20], it panics when len(dst) < 20
+func (x Uint128) PutBytes20(dst []byte) {
+	if len(dst) < 20 {
+		panic("fat.Uint128.PutBytes20: short buffer")
+	}
+	binary.BigEndian.PutUint32(dst, 0)
+	binary.BigEndian.PutUint64(dst[4:], x.L1)
+	binary.BigEndian.PutUint64(dst[12:], x.L0)
+}
+
+// PutBytes16 writes Bytes16 to dst[:16], it panics when len(dst) < 16
+func (x Uint128) PutBytes16(dst []byte) {
+	if len(dst) < 16 {
+		panic("fat.Uint128.PutBytes16: short buffer")
+	}
+	binary.BigEndian.PutUint64(dst, x.L1)
+	binary.BigEndian.PutUint64(dst[8:], x.L0)
+}
+
+// Bytes returns x big-endian without the zero bytes in front, empty for x == 0
+func (x Uint128) Bytes() []byte {
+	// one fixed-size allocation and no copy: faster than make of the length
+	var a [16]byte
+	binary.BigEndian.PutUint64(a[:], x.L1)
+	binary.BigEndian.PutUint64(a[8:], x.L0)
+	return a[16-x.ByteLen():]
+}
+
+// AppendBytes appends Bytes to dst
+func (x Uint128) AppendBytes(dst []byte) []byte {
+	// a copy of the tail of an array inlines, overlapping stores do not
+	var a [16]byte
+	binary.BigEndian.PutUint64(a[:], x.L1)
+	binary.BigEndian.PutUint64(a[8:], x.L0)
+	return append(dst, a[16-x.ByteLen():]...)
+}
+
+// uint128FromBytes reads big-endian b of less than 16 bytes.
+// A longer b loses the bytes above its last 16
+func uint128FromBytes(b []byte) Uint128 {
+	n := len(b)
+	if n < 4 {
+		// no loop over the bytes, its exit mispredicts on mixed lengths
+		if n == 0 {
+			return Uint128{}
+		}
+		// bytes 0, n/2 and n-1, the same byte twice for n < 3
+		return Uint128{uint64(b[0])<<(8*(n-1)&63) | uint64(b[n>>1])<<(8*(n-1-n>>1)&63) | uint64(b[n-1]), 0}
+	}
+	// 4-byte halves of the limbs: half k is the 4 bytes up to n-4k.
+	// One that starts before b takes b[:4] and shifts off what is past its end.
+	// One path from 4 bytes on: a branch at 8 bytes mispredicts around 2^64
+	s1, s2, s3 := n-8, n-12, n-16
+	c1, c2, c3 := s1&^(s1>>(bits.UintSize-1)), s2&^(s2>>(bits.UintSize-1)), s3&^(s3>>(bits.UintSize-1))
+	w0 := uint64(binary.BigEndian.Uint32(b[n-4 : n]))
+	w1 := uint64(binary.BigEndian.Uint32(b[c1:c1+4])) >> uint(8*(c1-s1))
+	w2 := uint64(binary.BigEndian.Uint32(b[c2:c2+4])) >> uint(8*(c2-s2))
+	w3 := uint64(binary.BigEndian.Uint32(b[c3:c3+4])) >> uint(8*(c3-s3))
+	return Uint128{w0 | w1<<32, w2 | w3<<32}
 }
 
 // --- comparison -----------------------------------------

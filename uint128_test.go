@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"math/big"
+	"math/rand"
 	"sync"
 	"testing"
 
@@ -833,7 +834,7 @@ func narrowUint128(y Uint128, width int) Uint128 {
 var kU128 = Kind[Uint128]{
 	Name: "Uint128", Bits: 128,
 	Ref: RefU128, Wrap: WrapU128, Fits: FitsU128,
-	FromBig: MustUint128FromBig, FromFloat64: Uint128FromFloat64, MustFromFloat64: MustUint128FromFloat64, Small: NewUint128,
+	FromBig: MustUint128FromBig, FromBytes: Uint128FromBytes, MustFromBytes: MustUint128FromBytes, FromFloat64: Uint128FromFloat64, MustFromFloat64: MustUint128FromFloat64, Small: NewUint128,
 	FromDec: Uint128FromDec, FromHex: Uint128FromHex, MustFromDec: MustUint128FromDec, MustFromHex: MustUint128FromHex,
 	Dirty: Uint128{7, 7}, Max: MaxUint128(),
 	Values: Values128, Pairs: Pairs128,
@@ -905,6 +906,12 @@ func TestUint128Sqrt(t *testing.T) { RunSqrt(t, kU128) }
 
 // TestUint128Log10 checks Log10 at every power of ten and bit length
 func TestUint128Log10(t *testing.T) { RunLog10(t, kU128) }
+
+// TestUint128Bytes checks the byte API with big.Int
+func TestUint128Bytes(t *testing.T) { RunBytes(t, kU128) }
+
+// TestUint128Bytes16 checks Bytes16 and PutBytes16 with big.Int
+func TestUint128Bytes16(t *testing.T) { RunBytes16(t, kU128) }
 
 // TestUint128Float checks Float64 and FromFloat64 with big.Float
 func TestUint128Float(t *testing.T) { RunFloat(t, kU128) }
@@ -991,6 +998,89 @@ func BenchmarkUint128Pow(b *testing.B) {
 	b.Run("op=Log10", func(b *testing.B) {
 		for i := range b.N {
 			SinkInt = a[i&BenchMask].Log10()
+		}
+	})
+}
+
+// BenchmarkUint128Bytes measures the byte API on random values and indexes
+func BenchmarkUint128Bytes(b *testing.B) {
+	x := benchU128().u128
+	r := rand.New(rand.NewSource(4))
+	idx, ext := make([]int, len(x)), make([]int, len(x))
+	enc, word := make([][]byte, len(x)), make([][]byte, len(x))
+	for i, v := range x {
+		idx[i], ext[i] = r.Intn(16), r.Intn(16-1)
+		enc[i] = v.Bytes()
+		w := v.Bytes32()
+		word[i] = w[16:]
+	}
+	b.Run("op=ByteLen", func(b *testing.B) {
+		for i := range b.N {
+			SinkInt = x[i&BenchMask].ByteLen()
+		}
+	})
+	b.Run("op=Byte", func(b *testing.B) {
+		for i := range b.N {
+			SinkByte = x[i&BenchMask].Byte(idx[i&BenchMask])
+		}
+	})
+	b.Run("op=ExtendSign", func(b *testing.B) {
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].ExtendSign(ext[i&BenchMask])
+		}
+	})
+	b.Run("op=Bytes32", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes32 = x[i&BenchMask].Bytes32()
+		}
+	})
+	b.Run("op=Bytes20", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes20 = x[i&BenchMask].Bytes20()
+		}
+	})
+	b.Run("op=PutBytes32", func(b *testing.B) {
+		w := SinkBytes32[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes32(w)
+		}
+	})
+	b.Run("op=PutBytes20", func(b *testing.B) {
+		w := SinkBytes20[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes20(w)
+		}
+	})
+	b.Run("op=Bytes16", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes16 = x[i&BenchMask].Bytes16()
+		}
+	})
+	b.Run("op=PutBytes16", func(b *testing.B) {
+		w := SinkBytes16[:]
+		for i := range b.N {
+			x[i&BenchMask].PutBytes16(w)
+		}
+	})
+	b.Run("op=Bytes", func(b *testing.B) {
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].Bytes()
+		}
+	})
+	b.Run("op=AppendBytes", func(b *testing.B) {
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			SinkBytes = x[i&BenchMask].AppendBytes(buf)
+		}
+	})
+	b.Run("op=FromBytes", func(b *testing.B) {
+		for i := range b.N {
+			sinkU128, SinkBool = Uint128FromBytes(enc[i&BenchMask])
+		}
+	})
+	b.Run("op=FromBytes/full", func(b *testing.B) {
+		for i := range b.N {
+			sinkU128, SinkBool = Uint128FromBytes(word[i&BenchMask])
 		}
 	})
 }

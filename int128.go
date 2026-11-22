@@ -67,6 +67,37 @@ func MustInt128FromBig(v *big.Int) Int128 {
 	return x
 }
 
+// Int128FromBytes reads big-endian b and whether it fits, zero if it does not.
+// The last 16 bytes are the two's complement word, fewer are zero-extended.
+// The bytes before them must be all 0, or all 0xFF when the word is negative
+func Int128FromBytes(b []byte) (Int128, bool) {
+	if n := len(b); n >= 16 {
+		// the bytes in front are zeros, or 0xFF for a negative word.
+		// Both in one loop: a call to Uint128FromBytes benchmarked slower
+		s := byte(int8(b[n-16]) >> 7)
+		var nz, ns byte
+		for _, c := range b[:n-16] {
+			nz |= c
+			ns |= c ^ s
+		}
+		if nz != 0 && ns != 0 {
+			return Int128{}, false
+		}
+		b = b[n-16:]
+		return Int128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}, true
+	}
+	return Int128(uint128FromBytes(b)), true
+}
+
+// MustInt128FromBytes is Int128FromBytes that panics when b does not fit
+func MustInt128FromBytes(b []byte) Int128 {
+	x, ok := Int128FromBytes(b)
+	if !ok {
+		panic("fat.MustInt128FromBytes: out of range")
+	}
+	return x
+}
+
 // Int128FromFloat64 returns v truncated toward zero and whether it fits.
 // It returns zero and false for a NaN, for v < -2^127 and for v >= 2^127
 func Int128FromFloat64(v float64) (Int128, bool) {
@@ -324,6 +355,119 @@ func (x *Int128) GobDecode(b []byte) error {
 	}
 	*x = Int128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}
 	return nil
+}
+
+// --- bytes ----------------------------------------------
+
+// ByteLen returns the length of Bytes, 16 for x < 0
+func (x Int128) ByteLen() int {
+	return Uint128(x).ByteLen()
+}
+
+// Byte returns byte i of the 16 big-endian bytes of x in two's complement.
+// It returns 0 for i >= 16 and panics for i < 0
+func (x Int128) Byte(i int) byte {
+	if uint(i) >= 16 {
+		if i < 0 {
+			panic("fat.Int128.Byte: negative index")
+		}
+		return 0
+	}
+	// the bit offset of the byte, the limb by a conditional move
+	s := uint(15-i) * 8
+	v := x.L0
+	if s >= 64 {
+		v = x.L1
+	}
+	return byte(v >> (s & 63))
+}
+
+// ExtendSign returns x sign-extended from byte b, counted from the low end.
+// It returns x for b >= 15 and panics for b < 0
+func (x Int128) ExtendSign(b int) Int128 {
+	if uint(b) >= 15 {
+		if b < 0 {
+			panic("fat.Int128.ExtendSign: negative index")
+		}
+		return x
+	}
+	// as Uint128.ExtendSign, a call to it would panic under its name
+	k := uint(^b&7) * 8
+	lo := uint64(int64(x.L0<<k) >> k)
+	hi := uint64(int64(lo) >> 63)
+	if b >= 8 {
+		lo, hi = x.L0, uint64(int64(x.L1<<k)>>k)
+	}
+	return Int128{lo, hi}
+}
+
+// Bytes32 returns x as 32 bytes big-endian in two's complement
+func (x Int128) Bytes32() (b [32]byte) {
+	m := uint64(int64(x.L1) >> 63)
+	binary.BigEndian.PutUint64(b[:], m)
+	binary.BigEndian.PutUint64(b[8:], m)
+	binary.BigEndian.PutUint64(b[16:], x.L1)
+	binary.BigEndian.PutUint64(b[24:], x.L0)
+	return
+}
+
+// Bytes20 returns the low 20 bytes of Bytes32
+func (x Int128) Bytes20() (b [20]byte) {
+	// Uint128.Bytes20 with the sign on top.
+	// On Graviton the stores at 0, 8 and 16 forward to the copy of the result
+	binary.BigEndian.PutUint64(b[:], uint64(int64(x.L1)>>32))
+	binary.BigEndian.PutUint64(b[8:], x.L1<<32|x.L0>>32)
+	binary.BigEndian.PutUint32(b[16:], uint32(x.L0))
+	return
+}
+
+// Bytes16 returns x as 16 big-endian bytes, two's complement
+func (x Int128) Bytes16() (b [16]byte) {
+	binary.BigEndian.PutUint64(b[:], x.L1)
+	binary.BigEndian.PutUint64(b[8:], x.L0)
+	return
+}
+
+// PutBytes32 writes Bytes32 to dst[:32], it panics when len(dst) < 32
+func (x Int128) PutBytes32(dst []byte) {
+	if len(dst) < 32 {
+		panic("fat.Int128.PutBytes32: short buffer")
+	}
+	m := uint64(int64(x.L1) >> 63)
+	binary.BigEndian.PutUint64(dst, m)
+	binary.BigEndian.PutUint64(dst[8:], m)
+	binary.BigEndian.PutUint64(dst[16:], x.L1)
+	binary.BigEndian.PutUint64(dst[24:], x.L0)
+}
+
+// PutBytes20 writes Bytes20 to dst[:20], it panics when len(dst) < 20
+func (x Int128) PutBytes20(dst []byte) {
+	if len(dst) < 20 {
+		panic("fat.Int128.PutBytes20: short buffer")
+	}
+	binary.BigEndian.PutUint32(dst, uint32(int64(x.L1)>>63))
+	binary.BigEndian.PutUint64(dst[4:], x.L1)
+	binary.BigEndian.PutUint64(dst[12:], x.L0)
+}
+
+// PutBytes16 writes Bytes16 to dst[:16], it panics when len(dst) < 16
+func (x Int128) PutBytes16(dst []byte) {
+	if len(dst) < 16 {
+		panic("fat.Int128.PutBytes16: short buffer")
+	}
+	binary.BigEndian.PutUint64(dst, x.L1)
+	binary.BigEndian.PutUint64(dst[8:], x.L0)
+}
+
+// Bytes returns x in two's complement big-endian without leading zero bytes.
+// It is 16 bytes long for x < 0 and empty for x == 0
+func (x Int128) Bytes() []byte {
+	return Uint128(x).Bytes()
+}
+
+// AppendBytes appends Bytes to dst
+func (x Int128) AppendBytes(dst []byte) []byte {
+	return Uint128(x).AppendBytes(dst)
 }
 
 // --- sign -----------------------------------------------

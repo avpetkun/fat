@@ -72,6 +72,37 @@ func MustInt256FromBig(v *big.Int) Int256 {
 	return x
 }
 
+// Int256FromBytes reads big-endian b and whether it fits, zero if it does not.
+// The last 32 bytes are the two's complement word, fewer are zero-extended.
+// The bytes before them must be all 0, or all 0xFF when the word is negative
+func Int256FromBytes(b []byte) (Int256, bool) {
+	if n := len(b); n >= 32 {
+		// the bytes in front are all 0, or all 0xFF over a negative word.
+		// The loop of Uint256FromBytes written out, its call is slower
+		s := byte(int8(b[n-32]) >> 7)
+		var nz, ns byte
+		for _, c := range b[:n-32] {
+			nz |= c
+			ns |= c ^ s
+		}
+		if nz != 0 && ns != 0 {
+			return Int256{}, false
+		}
+		b = b[n-32:]
+		return Int256{binary.BigEndian.Uint64(b[24:]), binary.BigEndian.Uint64(b[16:]), binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}, true
+	}
+	return Int256(uint256FromBytes(b)), true
+}
+
+// MustInt256FromBytes is Int256FromBytes that panics when b does not fit
+func MustInt256FromBytes(b []byte) Int256 {
+	x, ok := Int256FromBytes(b)
+	if !ok {
+		panic("fat.MustInt256FromBytes: out of range")
+	}
+	return x
+}
+
 // Int256FromFloat64 returns v truncated toward zero and whether it fits.
 // It returns zero and false for a NaN, for v < -2^255 and for v >= 2^255
 func Int256FromFloat64(v float64) (Int256, bool) {
@@ -393,6 +424,91 @@ func (x *Int256) GobDecode(b []byte) error {
 		binary.BigEndian.Uint64(b),
 	}
 	return nil
+}
+
+// --- bytes ----------------------------------------------
+
+// ByteLen returns the length of Bytes, 32 for x < 0
+func (x Int256) ByteLen() int {
+	return Uint256(x).ByteLen()
+}
+
+// Byte returns byte i of the 32 big-endian bytes of x in two's complement.
+// It returns 0 for i >= 32 and panics for i < 0
+func (x Int256) Byte(i int) byte {
+	if uint(i) >= 32 {
+		if i < 0 {
+			panic("fat.Int256.Byte: negative index")
+		}
+		return 0
+	}
+	// the bit offset of the byte, the limb by conditional moves
+	s := uint(31-i) * 8
+	v := x.L0
+	if s >= 64 {
+		v = x.L1
+	}
+	if s >= 128 {
+		v = x.L2
+	}
+	if s >= 192 {
+		v = x.L3
+	}
+	return byte(v >> (s & 63))
+}
+
+// ExtendSign returns x sign-extended from byte b, counted from the low end.
+// It returns x for b >= 31 and panics for b < 0
+func (x Int256) ExtendSign(b int) Int256 {
+	if uint(b) >= 31 {
+		if b < 0 {
+			panic("fat.Int256.ExtendSign: negative index")
+		}
+		return x
+	}
+	return Int256(Uint256(x).extend(uint(b)*8 + 7))
+}
+
+// Bytes32 returns x as 32 bytes big-endian in two's complement
+func (x Int256) Bytes32() [32]byte {
+	return Uint256(x).Bytes32()
+}
+
+// Bytes20 returns the low 20 bytes of Bytes32
+func (x Int256) Bytes20() [20]byte {
+	return Uint256(x).Bytes20()
+}
+
+// PutBytes32 writes Bytes32 to dst[:32], it panics when len(dst) < 32
+func (x Int256) PutBytes32(dst []byte) {
+	if len(dst) < 32 {
+		panic("fat.Int256.PutBytes32: short buffer")
+	}
+	binary.BigEndian.PutUint64(dst, x.L3)
+	binary.BigEndian.PutUint64(dst[8:], x.L2)
+	binary.BigEndian.PutUint64(dst[16:], x.L1)
+	binary.BigEndian.PutUint64(dst[24:], x.L0)
+}
+
+// PutBytes20 writes Bytes20 to dst[:20], it panics when len(dst) < 20
+func (x Int256) PutBytes20(dst []byte) {
+	if len(dst) < 20 {
+		panic("fat.Int256.PutBytes20: short buffer")
+	}
+	binary.BigEndian.PutUint32(dst, uint32(x.L2))
+	binary.BigEndian.PutUint64(dst[4:], x.L1)
+	binary.BigEndian.PutUint64(dst[12:], x.L0)
+}
+
+// Bytes returns x in two's complement big-endian without leading zero bytes.
+// It is 32 bytes long for x < 0 and empty for x == 0
+func (x Int256) Bytes() []byte {
+	return Uint256(x).Bytes()
+}
+
+// AppendBytes appends Bytes to dst
+func (x Int256) AppendBytes(dst []byte) []byte {
+	return Uint256(x).AppendBytes(dst)
 }
 
 // --- sign -----------------------------------------------

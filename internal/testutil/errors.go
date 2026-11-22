@@ -146,6 +146,9 @@ func RunPanicText[T Num[T]](t *testing.T, k Kind[T]) {
 	}
 	big256 := new(big.Int).Lsh(Big1, 256)
 	require.Equal(t, "fat.Must"+k.Name+"FromBig: out of range", PanicValue(func() { k.FromBig(big256) }))
+	// a byte past the width that is not padding
+	over := append([]byte{1}, make([]byte, k.Bits/8)...)
+	require.Equal(t, "fat.Must"+k.Name+"FromBytes: out of range", PanicValue(func() { k.MustFromBytes(over) }))
 	if !k.Signed {
 		// a negative big.Int is told apart from a wide one, wide or not itself
 		for _, b := range []*big.Int{big.NewInt(-1), new(big.Int).Neg(big256)} {
@@ -155,6 +158,13 @@ func RunPanicText[T Num[T]](t *testing.T, k Kind[T]) {
 	require.Equal(t, typ+".Bit: negative index", PanicValue(func() { k.Zero.Bit(-1) }))
 	require.Equal(t, typ+".WithBit: negative index", PanicValue(func() { k.Zero.WithBit(-1, 0) }))
 	require.Equal(t, typ+".WithBit: bit not 0 or 1", PanicValue(func() { k.Zero.WithBit(0, 2) }))
+	for _, n := range []int{-1, math.MinInt} {
+		require.Equal(On(t, n), typ+".Byte: negative index", PanicValue(func() { k.Zero.Byte(n) }))
+		require.Equal(On(t, n), typ+".ExtendSign: negative index", PanicValue(func() { k.Zero.ExtendSign(n) }))
+	}
+	// one byte short
+	require.Equal(t, typ+".PutBytes32: short buffer", PanicValue(func() { k.Zero.PutBytes32(make([]byte, 31)) }))
+	require.Equal(t, typ+".PutBytes20: short buffer", PanicValue(func() { k.Zero.PutBytes20(make([]byte, 19)) }))
 	// a negative shift panics as the << operator does
 	for _, n := range []int{-1, math.MinInt} {
 		require.Equal(On(t, n), typ+".Lsh: negative shift", PanicValue(func() { k.Zero.Lsh(n) }))
