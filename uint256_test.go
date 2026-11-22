@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"math/bits"
@@ -120,6 +121,18 @@ func TestUint256ParseLengths(t *testing.T) {
 func TestUint256Encoding(t *testing.T) {
 	t.Parallel()
 	RunBinaryLengths(t, kU256)
+
+	// gob and json pick up the interfaces
+	type doc struct{ A, B Uint256 }
+	in := doc{MaxUint256(), Uint256{1, 2, 3, 4}}
+	var out doc
+
+	js, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Equal(t, `{"A":"`+MaxUint256().String()+`","B":"`+RefU256(in.B).String()+`"}`, string(js))
+	out = doc{}
+	require.NoError(t, json.Unmarshal(js, &out))
+	require.Equal(t, in, out)
 
 	RunJSON(t, kU256)
 }
@@ -895,6 +908,14 @@ func BenchmarkUint256Hex(b *testing.B) {
 // BenchmarkUint256Decimal measures AppendText and FromDec on mixed lengths
 func BenchmarkUint256Decimal(b *testing.B) {
 	in := benchU256()
+	b.Run("op=AppendText/digits=mixed", func(b *testing.B) {
+		x := in.u256
+		buf := make([]byte, 0, 100)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendText(buf[:0])
+		}
+		SinkBytes = buf
+	})
 	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
 		x := in.u256s
 		for i := range b.N {
@@ -956,7 +977,7 @@ var kU256 = Kind[Uint256]{
 	Ref: RefU256, Wrap: WrapU256, Fits: FitsU256,
 	FromBig: MustUint256FromBig, FromFloat64: Uint256FromFloat64, MustFromFloat64: MustUint256FromFloat64, Small: NewUint256,
 	FromDec: Uint256FromDec, FromHex: Uint256FromHex, MustFromDec: MustUint256FromDec, MustFromHex: MustUint256FromHex,
-	Max:    MaxUint256(),
+	Dirty: Uint256{7, 7, 7, 7}, Max: MaxUint256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowUint256,
 	Shifts: Shifts256,

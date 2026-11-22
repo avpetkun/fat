@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"sync"
@@ -67,6 +68,18 @@ func TestInt128Convert(t *testing.T) {
 func TestInt128Encoding(t *testing.T) {
 	t.Parallel()
 	RunBinaryLengths(t, kI128)
+
+	// gob and json pick up the interfaces
+	type doc struct{ A, B Int128 }
+	in := doc{MinInt128(), MaxInt128()}
+	var out doc
+
+	js, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Equal(t, `{"A":"`+BigMinInt128.String()+`","B":"`+BigMaxInt128.String()+`"}`, string(js))
+	out = doc{}
+	require.NoError(t, json.Unmarshal(js, &out))
+	require.Equal(t, in, out)
 
 	RunJSON(t, kI128)
 }
@@ -399,6 +412,14 @@ func benchBigs128(x []Int128) []*big.Int {
 // BenchmarkInt128Decimal measures decimal output and parsing, mixed lengths
 func BenchmarkInt128Decimal(b *testing.B) {
 	in := benchI128()
+	b.Run("op=AppendText/digits=mixed", func(b *testing.B) {
+		x := in.i128
+		buf := make([]byte, 0, 100)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendText(buf[:0])
+		}
+		SinkBytes = buf
+	})
 	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
 		x := in.i128s
 		for i := range b.N {
@@ -413,7 +434,7 @@ var kI128 = Kind[Int128]{
 	Ref: RefI128, Wrap: WrapI128, Fits: FitsI128,
 	FromBig: MustInt128FromBig, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64, Small: func(v uint64) Int128 { return NewInt128(int64(v)) },
 	FromDec: Int128FromDec, FromHex: Int128FromHex, MustFromDec: MustInt128FromDec, MustFromHex: MustInt128FromHex,
-	Max: MaxInt128(), Min: MinInt128(),
+	Dirty: Int128{7, 7}, Max: MaxInt128(), Min: MinInt128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowInt128,
 	Shifts: Shifts128,

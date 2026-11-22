@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"sync"
@@ -66,6 +67,18 @@ func TestUint128Convert(t *testing.T) {
 func TestUint128Encoding(t *testing.T) {
 	t.Parallel()
 	RunBinaryLengths(t, kU128)
+
+	// gob and json pick up the interfaces
+	type doc struct{ A, B Uint128 }
+	in := doc{MaxUint128(), Uint128{1, 2}}
+	var out doc
+
+	js, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Equal(t, `{"A":"`+MaxUint128().String()+`","B":"`+RefU128(in.B).String()+`"}`, string(js))
+	out = doc{}
+	require.NoError(t, json.Unmarshal(js, &out))
+	require.Equal(t, in, out)
 
 	RunJSON(t, kU128)
 }
@@ -743,6 +756,14 @@ func BenchmarkUint128Convert(b *testing.B) {
 // BenchmarkUint128Decimal measures decimal output and parsing, mixed lengths
 func BenchmarkUint128Decimal(b *testing.B) {
 	in := benchU128()
+	b.Run("op=AppendText/digits=mixed", func(b *testing.B) {
+		x := in.u128
+		buf := make([]byte, 0, 100)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendText(buf[:0])
+		}
+		SinkBytes = buf
+	})
 	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
 		x := in.u128s
 		for i := range b.N {
@@ -765,7 +786,7 @@ var kU128 = Kind[Uint128]{
 	Ref: RefU128, Wrap: WrapU128, Fits: FitsU128,
 	FromBig: MustUint128FromBig, FromFloat64: Uint128FromFloat64, MustFromFloat64: MustUint128FromFloat64, Small: NewUint128,
 	FromDec: Uint128FromDec, FromHex: Uint128FromHex, MustFromDec: MustUint128FromDec, MustFromHex: MustUint128FromHex,
-	Max:    MaxUint128(),
+	Dirty: Uint128{7, 7}, Max: MaxUint128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowUint128,
 	Shifts: Shifts128,
@@ -781,19 +802,7 @@ var kU128 = Kind[Uint128]{
 func TestUint128Fmt(t *testing.T) { RunFmt(t, kU128) }
 
 // TestUint128ParseErrors checks FromDec on malformed and out of range input
-func TestUint128ParseErrors(t *testing.T) {
-	RunParseErrors(t, kU128)
-	// the JSON forms of the text, as UnmarshalJSON will give them
-	for _, c := range []struct{ text, want string }{
-		{``, `fat.Uint128.UnmarshalJSON: empty JSON`},
-		{`1x`, `fat.Uint128.UnmarshalJSON: cannot parse 1x: invalid digit 'x' at offset 1`},
-		{`0x1`, `fat.Uint128.UnmarshalJSON: cannot parse 0x1: 0x outside quotes`},
-		{`"1x"`, `fat.Uint128.UnmarshalJSON: cannot parse "1x": invalid digit 'x' at offset 1`},
-		{`"1\u0078"`, `fat.Uint128.UnmarshalJSON: cannot parse "1\u0078": invalid digit 'x' at offset 1`},
-	} {
-		require.Equal(t, c.want, ErrParse{"Uint128.UnmarshalJSON", c.text}.Error())
-	}
-}
+func TestUint128ParseErrors(t *testing.T) { RunParseErrors(t, kU128) }
 
 // TestUint128Bits checks BitLen, Not, shifts, Bit and WithBit with big.Int
 func TestUint128Bits(t *testing.T) { RunBits(t, kU128) }

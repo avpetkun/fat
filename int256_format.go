@@ -1,7 +1,9 @@
 package fat
 
 import (
+	"encoding"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/bits"
 )
@@ -132,6 +134,99 @@ func (x Int256) Format(f fmt.State, verb rune) {
 	var buf [256]byte
 	// digits of |x| only, right for MinInt256 too, the flags add the rest
 	formatNumber(f, verb, x.IsNegative(), x.UnsignedAbs().appendBase(buf[:0], base))
+}
+
+var (
+	_ encoding.TextMarshaler   = (*Int256)(nil)
+	_ encoding.TextAppender    = (*Int256)(nil)
+	_ encoding.TextUnmarshaler = (*Int256)(nil)
+)
+
+// MarshalText is decimal x in a slice of its exact size
+func (x Int256) MarshalText() ([]byte, error) {
+	// a stack buffer copied out, no spare capacity is kept
+	var buf [78]byte
+	d := x.appendDecimal(buf[:0])
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// AppendText appends decimal x to b
+func (x Int256) AppendText(b []byte) ([]byte, error) {
+	return x.appendDecimal(b), nil
+}
+
+// UnmarshalText parses as Int256FromDec with no exponent form, or as
+// Int256FromHex after 0x.
+// x stays as is on an error
+func (x *Int256) UnmarshalText(text []byte) error {
+	v, ok := parseInt256(text, 0)
+	if !ok {
+		return ErrParse{"Int256.UnmarshalText", string(text)}
+	}
+	*x = v
+	return nil
+}
+
+var (
+	_ json.Marshaler   = (*Int256)(nil)
+	_ json.Unmarshaler = (*Int256)(nil)
+)
+
+// MarshalJSON returns x as a quoted decimal string.
+// JSON parsers on float64 lose the digits of a number past 2^53
+func (x Int256) MarshalJSON() ([]byte, error) {
+	// a stack buffer copied out, no spare capacity is kept
+	var buf [80]byte
+	buf[0] = '"'
+	d := append(x.appendDecimal(buf[:1]), '"')
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// UnmarshalJSON reads a string as UnmarshalText and a number as plain decimal.
+// null leaves x as is, as an error does
+func (x *Int256) UnmarshalJSON(text []byte) error {
+	if len(text) > 4 && text[0] == '"' && text[1] == '0' && text[2]|0x20 == 'x' && text[len(text)-1] == '"' {
+		// hex with no sign goes straight to its digits, its top bit must be 0.
+		// Faster than the parser by the prefix in our benchmarks
+		if u, ok := uint256FromHex(text[3 : len(text)-1]); ok && u.L3>>63 == 0 {
+			*x = Int256(u)
+			return nil
+		}
+		return x.unmarshalJSONSlow(text)
+	}
+	d, base := text, 10
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		d, base = d[1:len(d)-1], 0
+	}
+	v, ok := parseInt256(d, base)
+	if !ok {
+		return x.unmarshalJSONSlow(text)
+	}
+	*x = v
+	return nil
+}
+
+// unmarshalJSONSlow is UnmarshalJSON for what its fast path turns down:
+// null, a string with escapes and the errors
+func (x *Int256) unmarshalJSONSlow(text []byte) error {
+	if string(text) == "null" {
+		return nil
+	}
+	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
+		// a buffer the size of the longest text but for leading zeros
+		var buf [80]byte
+		if u, ok := jsonUnescape(buf[:0], text[1:len(text)-1]); ok {
+			if v, ok := parseInt256(u, 0); ok {
+				*x = v
+				return nil
+			}
+		}
+	}
+	return ErrParse{"Int256.UnmarshalJSON", string(text)}
 }
 
 // putHex writes Hex to the end of buf and returns the index it starts at.

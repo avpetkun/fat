@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"math/rand"
@@ -70,6 +71,18 @@ func TestInt256Convert(t *testing.T) {
 func TestInt256Encoding(t *testing.T) {
 	t.Parallel()
 	RunBinaryLengths(t, kI256)
+
+	// gob and json pick up the interfaces
+	type doc struct{ A, B Int256 }
+	in := doc{MinInt256(), MaxInt256()}
+	var out doc
+
+	js, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Equal(t, `{"A":"`+BigMinInt256.String()+`","B":"`+BigMaxInt256.String()+`"}`, string(js))
+	out = doc{}
+	require.NoError(t, json.Unmarshal(js, &out))
+	require.Equal(t, in, out)
 
 	RunJSON(t, kI256)
 }
@@ -463,6 +476,14 @@ func BenchmarkInt256(b *testing.B) {
 // BenchmarkInt256Decimal measures decimal text both ways on mixed lengths
 func BenchmarkInt256Decimal(b *testing.B) {
 	in := benchI256()
+	b.Run("op=AppendText/digits=mixed", func(b *testing.B) {
+		x := in.i256
+		buf := make([]byte, 0, 100)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendText(buf[:0])
+		}
+		SinkBytes = buf
+	})
 	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
 		x := in.i256s
 		for i := range b.N {
@@ -474,6 +495,14 @@ func BenchmarkInt256Decimal(b *testing.B) {
 		for i := range b.N {
 			SinkString = x[i&BenchMask].String()
 		}
+	})
+	b.Run("op=MarshalText", func(b *testing.B) {
+		x := in.i256
+		var buf []byte
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].MarshalText()
+		}
+		SinkBytes = buf
 	})
 }
 
@@ -540,7 +569,7 @@ var kI256 = Kind[Int256]{
 	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
 	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64, Small: func(v uint64) Int256 { return NewInt256(int64(v)) },
 	FromDec: Int256FromDec, FromHex: Int256FromHex, MustFromDec: MustInt256FromDec, MustFromHex: MustInt256FromHex,
-	Max: MaxInt256(), Min: MinInt256(),
+	Dirty: Int256{7, 7, 7, 7}, Max: MaxInt256(), Min: MinInt256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowInt256,
 	Shifts: Shifts256,

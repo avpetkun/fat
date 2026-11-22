@@ -1,7 +1,9 @@
 package fat
 
 import (
+	"encoding"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/bits"
 )
@@ -152,6 +154,108 @@ func (x Int128) Format(f fmt.State, verb rune) {
 		d = a.appendBase(buf[:0], base)
 	}
 	formatNumber(f, verb, x.IsNegative(), d)
+}
+
+var (
+	_ encoding.TextMarshaler   = (*Int128)(nil)
+	_ encoding.TextAppender    = (*Int128)(nil)
+	_ encoding.TextUnmarshaler = (*Int128)(nil)
+)
+
+// MarshalText is decimal x in a slice of its exact size
+func (x Int128) MarshalText() ([]byte, error) {
+	// a stack buffer copied out, no spare capacity is kept
+	var buf [40]byte
+	// appendDecimal written out, a call less
+	var d []byte
+	a, neg := x.UnsignedAbs(), int64(x.L1) < 0
+	if a.L1 == 0 {
+		d = appendDecimalSign64(buf[:0], neg, a.L0)
+	} else {
+		// a.L1 <= 2^63 < 1e19 leaves one division, top > 0 as |x| >= 2^64
+		top, c0 := div2by1(a.L1, a.L0, decimalChunk, decimalChunkReciprocal)
+		d = appendDecimalParts(buf[:0], neg, top, c0, 0, 0, 0, 1)
+	}
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// AppendText appends decimal x to b
+func (x Int128) AppendText(b []byte) ([]byte, error) {
+	return x.appendDecimal(b), nil
+}
+
+// UnmarshalText parses as Int128FromDec with no exponent form, or as
+// Int128FromHex after 0x.
+// x stays as is on an error
+func (x *Int128) UnmarshalText(text []byte) error {
+	v, ok := parseInt128(text, 0)
+	if !ok {
+		return ErrParse{"Int128.UnmarshalText", string(text)}
+	}
+	*x = v
+	return nil
+}
+
+var (
+	_ json.Marshaler   = (*Int128)(nil)
+	_ json.Unmarshaler = (*Int128)(nil)
+)
+
+// MarshalJSON returns x as a quoted decimal string.
+// JSON parsers on float64 lose the digits of a number past 2^53
+func (x Int128) MarshalJSON() ([]byte, error) {
+	// a stack buffer copied out, no spare capacity is kept
+	var buf [42]byte
+	buf[0] = '"'
+	d := append(x.appendDecimal(buf[:1]), '"')
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// UnmarshalJSON reads a string as UnmarshalText and a number as plain decimal.
+// null leaves x as is, as an error does
+func (x *Int128) UnmarshalJSON(text []byte) error {
+	if len(text) > 4 && text[0] == '"' && text[1] == '0' && text[2]|0x20 == 'x' && text[len(text)-1] == '"' {
+		// hex with no sign goes to the digit parser, the top bit must be clear.
+		// Faster than parseInt128 by the prefix in our benchmarks
+		if u, ok := uint128FromHex(text[3 : len(text)-1]); ok && u.L1>>63 == 0 {
+			*x = Int128(u)
+			return nil
+		}
+		return x.unmarshalJSONSlow(text)
+	}
+	d, base := text, 10
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		d, base = d[1:len(d)-1], 0
+	}
+	v, ok := parseInt128(d, base)
+	if !ok {
+		return x.unmarshalJSONSlow(text)
+	}
+	*x = v
+	return nil
+}
+
+// unmarshalJSONSlow is UnmarshalJSON for what its fast path turns down:
+// null, a string with escapes and the errors
+func (x *Int128) unmarshalJSONSlow(text []byte) error {
+	if string(text) == "null" {
+		return nil
+	}
+	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
+		// a buffer the size of the longest text but for leading zeros
+		var buf [80]byte
+		if u, ok := jsonUnescape(buf[:0], text[1:len(text)-1]); ok {
+			if v, ok := parseInt128(u, 0); ok {
+				*x = v
+				return nil
+			}
+		}
+	}
+	return ErrParse{"Int128.UnmarshalJSON", string(text)}
 }
 
 // parseInt128 parses s with an optional sign in base 10 or 16.

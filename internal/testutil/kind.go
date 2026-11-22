@@ -29,6 +29,8 @@ type Num[T any] interface {
 	AppendDec(dst []byte) []byte
 	AppendHex(dst []byte) []byte
 	PrettyDec(sep byte) string
+	AppendText(b []byte) ([]byte, error)
+	MarshalText() ([]byte, error)
 	Exp(y T) T
 	Expo(y T) (T, bool)
 	Expu(y T) T
@@ -43,6 +45,8 @@ type Num[T any] interface {
 // NumPtr is the pointer side of Num, the unmarshalers and Scan
 type NumPtr[T any] interface {
 	*T
+	UnmarshalText(text []byte) error
+	UnmarshalJSON(text []byte) error
 }
 
 // SignNum is Num with Sign
@@ -78,6 +82,7 @@ type Kind[T Num[T]] struct {
 	FromHex     func(s string) (T, error)
 	MustFromDec func(s string) T
 	MustFromHex func(s string) T
+	Dirty       T // every limb 7, unmarshalers must overwrite it all
 	Zero        T
 	Max, Min    T
 	Values      func(func(T))

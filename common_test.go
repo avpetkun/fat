@@ -407,6 +407,36 @@ func TestJSONUnescape(t *testing.T) {
 	}
 }
 
+// TestJSONAllocs checks that the escapes of a JSON string take no allocation,
+// the text stays in a buffer on the stack, and an error takes only its own
+func TestJSONAllocs(t *testing.T) {
+	text := []byte(`"\u0031` + strings.Repeat("9", 76) + `"`)
+	n := 0
+	require.Equal(t, 0.0, testing.AllocsPerRun(100, func() {
+		var buf [80]byte
+		d, _ := jsonUnescape(buf[:0], text[1:len(text)-1])
+		n = len(d)
+	}))
+	require.Equal(t, 77, n)
+	var u Uint256
+	var i Int256
+	var err error
+	require.Equal(t, 0.0, testing.AllocsPerRun(100, func() {
+		err = u.UnmarshalJSON(text)
+		err = i.UnmarshalJSON(text)
+	}))
+	require.NoError(t, err)
+	require.False(t, u.IsZero() || i.IsZero())
+	// the reason of an error of a text past 32 bytes, the stack buffer of a
+	// conversion, with a message within the buffer of Error
+	bad := ErrParse{"Uint256.UnmarshalJSON", `"\u0031` + strings.Repeat("9", 30) + `x"`}
+	msg := ""
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() {
+		msg = bad.Error()
+	}))
+	require.True(t, strings.HasSuffix(msg, ": invalid digit 'x' at offset 31"))
+}
+
 // TestMontgomery checks montMul, montSqr and the forms on 64 and 128 bits
 // with big.Int: a * b / R % m for odd m of every length, near R too,
 // and a, b at random and next to m, where the last subtraction of m comes

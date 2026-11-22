@@ -1,7 +1,9 @@
 package fat
 
 import (
+	"encoding"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/bits"
 )
@@ -193,6 +195,155 @@ func (x Uint128) Format(f fmt.State, verb rune) {
 	var buf [128]byte
 	// digits only, sign and padding come from the flags
 	formatNumber(f, verb, false, x.appendBase(buf[:0], base))
+}
+
+var (
+	_ encoding.TextMarshaler   = (*Uint128)(nil)
+	_ encoding.TextAppender    = (*Uint128)(nil)
+	_ encoding.TextUnmarshaler = (*Uint128)(nil)
+)
+
+// MarshalText returns x in base 10
+func (x Uint128) MarshalText() ([]byte, error) {
+	// a stack buffer copied out, make and copy skip the zeroing
+	var buf [39]byte
+	// the decimal path of String
+	var d []byte
+	if x.L1 == 0 {
+		d = appendDecimal64(buf[:0], x.L0)
+	} else if x.L1 < decimalChunk {
+		// the writer of appendDecimal on the buffer
+		top, c0 := div1e19Mask(x.L1, x.L0)
+		nt := count64Digits(top)
+		b := buf[:nt+19]
+		// the head as blocks of 4, 8 and 8 digits ending at nt.
+		// A block starting before 0 is cut at 0,
+		// the stores after it overwrite what it writes past
+		hi := top / 1e8
+		t0 := top - hi*1e8
+		// 1e8 = 2^8 * 390625, 11529215047 / 2^52 ~ 1/390625
+		t2 := (hi >> 8) * 11529215047 >> 52
+		t1 := hi - t2*1e8
+		ch := c0 / 1e16
+		cq := c0 / 1e8
+		// t2 < 1845 and ch < 1000 as 4 digits in 32-bit lanes,
+		// 5243 / 2^19 ~ 1/100 and 103 / 2^10 ~ 1/10
+		g := t2 | ch<<32
+		gh := (g * 5243 >> 19) & (0x7F<<32 | 0x7F)
+		g = g<<16 - gh*(100<<16-1)
+		gt := (g * 103 >> 10) & (0xF<<48 | 0xF<<32 | 0xF<<16 | 0xF)
+		g = g<<8 + 0x3030303030303030 - gt*(10<<8-1)
+		p1, p0 := nt-16, nt-8
+		q1 := p1 &^ (p1 >> (bits.UintSize - 1))
+		q0 := p0 &^ (p0 >> (bits.UintSize - 1))
+		binary.LittleEndian.PutUint32(b, uint32(g>>(8*uint(20-nt)&63)))
+		binary.LittleEndian.PutUint64(b[q1:], digits8(t1)>>(8*uint(q1-p1)&63))
+		binary.LittleEndian.PutUint64(b[q0:], digits8(t0)>>(8*uint(q0-p0)&63))
+		// put19Digits written out,
+		// its 3-digit head from the lane above without the leading zero
+		c := b[nt:]
+		_ = c[18]
+		// the 4th byte is overwritten by the next store
+		binary.LittleEndian.PutUint32(c, uint32(g>>40))
+		binary.LittleEndian.PutUint64(c[3:], digits8(cq-ch*1e8))
+		binary.LittleEndian.PutUint64(c[11:], digits8(c0-cq*1e8))
+		d = b
+	} else {
+		q, c0 := div2by1(x.L1-decimalChunk, x.L0, decimalChunk, decimalChunkReciprocal)
+		top, c1 := div2by1(1, q, decimalChunk, decimalChunkReciprocal)
+		d = appendDecimalParts(buf[:0], false, top, c1, c0, 0, 0, 2)
+	}
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// AppendText appends MarshalText to b
+func (x Uint128) AppendText(b []byte) ([]byte, error) {
+	return x.appendDecimal(b), nil
+}
+
+// UnmarshalText parses as Uint128FromDec with no exponent form, or as
+// Uint128FromHex after 0x.
+// x stays as is on an error
+func (x *Uint128) UnmarshalText(text []byte) error {
+	v, ok := parseUint128(text, 0)
+	if !ok {
+		s := string(text)
+		if isNegativeText(s) {
+			return ErrNegative{"Uint128.UnmarshalText", s}
+		}
+		return ErrParse{"Uint128.UnmarshalText", s}
+	}
+	*x = v
+	return nil
+}
+
+var (
+	_ json.Marshaler   = (*Uint128)(nil)
+	_ json.Unmarshaler = (*Uint128)(nil)
+)
+
+// MarshalJSON returns x as a quoted decimal string.
+// JSON parsers on float64 lose the digits of a number past 2^53
+func (x Uint128) MarshalJSON() ([]byte, error) {
+	// a stack buffer copied out, no spare capacity is kept
+	var buf [41]byte
+	buf[0] = '"'
+	d := append(x.appendDecimal(buf[:1]), '"')
+	b := make([]byte, len(d))
+	copy(b, d)
+	return b, nil
+}
+
+// UnmarshalJSON reads a string as UnmarshalText and a number as plain decimal.
+// null leaves x as is, as an error does
+func (x *Uint128) UnmarshalJSON(text []byte) error {
+	if len(text) > 4 && text[0] == '"' && text[1] == '0' && text[2]|0x20 == 'x' && text[len(text)-1] == '"' {
+		// hex with no sign goes straight to its digits,
+		// faster than parseUint128 in our benchmarks
+		if v, ok := uint128FromHex(text[3 : len(text)-1]); ok {
+			*x = v
+			return nil
+		}
+		return x.unmarshalJSONSlow(text)
+	}
+	d, base := text, 10
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		d, base = d[1:len(d)-1], 0
+	}
+	v, ok := parseUint128(d, base)
+	if !ok {
+		return x.unmarshalJSONSlow(text)
+	}
+	*x = v
+	return nil
+}
+
+// unmarshalJSONSlow is UnmarshalJSON for what its fast path turns down:
+// null, a string with escapes and the errors
+func (x *Uint128) unmarshalJSONSlow(text []byte) error {
+	if string(text) == "null" {
+		return nil
+	}
+	d := text
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		d = d[1 : len(d)-1]
+		// a buffer the size of the longest text but for leading zeros
+		var buf [80]byte
+		if u, ok := jsonUnescape(buf[:0], d); ok {
+			if v, ok := parseUint128(u, 0); ok {
+				*x = v
+				return nil
+			}
+			d = u
+		}
+	}
+	// a string of d only for the error that keeps it
+	if isNegativeText(d) {
+		return ErrNegative{"Uint128.UnmarshalJSON", string(d)}
+	}
+	return ErrParse{"Uint128.UnmarshalJSON", string(text)}
 }
 
 // parseUint128 parses s with an optional plus in base 10 or 16.
@@ -440,6 +591,64 @@ func (x Uint128) putHex(buf *[35]byte) int {
 	// after the digits, the stores above write leading zeros over it
 	buf[z+1], buf[z+2] = '0', 'x'
 	return 1 + z
+}
+
+// uint128FromHex parses hex digits of either case with no prefix or sign.
+// For a nonempty s only, an empty s panics on bounds
+func uint128FromHex(s []byte) (Uint128, bool) {
+	// a copy of uint256FromHex for two limbs
+	// only zeros past 32 digits are dropped, the rest is parsed as is
+	for len(s) > 32 && s[0] == '0' {
+		s = s[1:]
+	}
+	n := len(s)
+	if n > 32 {
+		return Uint128{}, false
+	}
+	if n <= 8 {
+		// chars go to the low n bytes, first char on top
+		var x uint64
+		if n >= 4 {
+			// two overlapping 4-byte loads
+			x = uint64(binary.BigEndian.Uint32(s))<<(8*uint(n-4)) | uint64(binary.BigEndian.Uint32(s[n-4:]))
+		} else {
+			// first, middle and last byte cover 1..3 chars
+			x = uint64(s[0])<<(8*uint(n-1)) | uint64(s[(n-1)>>1])<<(8*uint(n-1-(n-1)>>1)) | uint64(s[n-1])
+		}
+		// left-pad with '0' to a full block
+		x |= 0x3030303030303030 &^ (^uint64(0) >> (8 * uint(8-n) & 63))
+		if notHexDigits8(x) != 0 {
+			return Uint128{}, false
+		}
+		return Uint128{hexDigits8(x), 0}, true
+	}
+	// the top limb holds the first m chars, the low one the last 16
+	m := n - 16*((n-1)>>4)
+	// its low block starts at o = max(m-8, 0), the high block ends there
+	d := m - 8
+	neg := d >> (bits.UintSize - 1)
+	o := d &^ neg
+	sl := 8 * uint(-d&neg) & 63
+	sh := 8 * uint(8-o)
+	lo := binary.BigEndian.Uint64(s[o:])
+	hi := binary.BigEndian.Uint64(s)
+	// chars of the lower blocks are shifted out, '0' pads the top
+	lo = lo>>sl | 0x3030303030303030&^(^uint64(0)>>sl)
+	hi = hi>>sh | 0x3030303030303030&^(^uint64(0)>>sh)
+	bad := notHexDigits8(lo) | notHexDigits8(hi)
+	top := hexDigits8(hi)<<32 | hexDigits8(lo)
+	var l0, l1 uint64
+	if n <= 16 {
+		l0 = top
+	} else {
+		a, b := binary.BigEndian.Uint64(s[n-16:]), binary.BigEndian.Uint64(s[n-8:])
+		bad |= notHexDigits8(a) | notHexDigits8(b)
+		l0, l1 = hexDigits8(a)<<32|hexDigits8(b), top
+	}
+	if bad != 0 {
+		return Uint128{}, false
+	}
+	return Uint128{l0, l1}, true
 }
 
 // div1e19Mask is div2by1 by decimalChunk, the likely correction by a mask.
