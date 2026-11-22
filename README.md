@@ -1,5 +1,9 @@
 # Fixed-size Arithmetic Types
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/avpetkun/fat.svg)](https://pkg.go.dev/github.com/avpetkun/fat)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/avpetkun/fat/actions/workflows/test.yml)
+[![tests](https://github.com/avpetkun/fat/actions/workflows/test.yml/badge.svg)](https://github.com/avpetkun/fat/actions/workflows/test.yml)
+
 128-bit and 256-bit integers for Go: `Int128`, `Uint128`, `Int256` and `Uint256`.
 
 - All four types are values: assignment copies them, `==` compares them and they work as map keys.
