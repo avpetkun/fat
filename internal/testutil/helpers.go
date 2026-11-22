@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -48,3 +49,6 @@ func CheckConvertUO[R any](t testing.TB, name string, fits bool, trunc R, u func
 	require.Equal(t, trunc, r)
 	require.Equal(t, !fits, over)
 }
+
+// ErrBad marks a parse case that must fail, the parsers do not say why
+var ErrBad = errors.New("bad")

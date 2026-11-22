@@ -23,6 +23,12 @@ type Num[T any] interface {
 	Max(y T) T
 	Min(y T) T
 	CmpBig(y *big.Int) int
+	String() string
+	Hex() string
+	Dec() string
+	AppendDec(dst []byte) []byte
+	AppendHex(dst []byte) []byte
+	PrettyDec(sep byte) string
 	Exp(y T) T
 	Expo(y T) (T, bool)
 	Expu(y T) T
@@ -32,6 +38,11 @@ type Num[T any] interface {
 	Float64() float64
 	DivToFloat64(y T) float64
 	DivToFloat64x(y T) (float64, bool)
+}
+
+// NumPtr is the pointer side of Num, the unmarshalers and Scan
+type NumPtr[T any] interface {
+	*T
 }
 
 // SignNum is Num with Sign
@@ -62,11 +73,15 @@ type Kind[T Num[T]] struct {
 	FromFloat64     func(float64) (T, bool)
 	MustFromFloat64 func(float64) T
 	// Small makes a small non-negative v
-	Small    func(v uint64) T
-	Zero     T
-	Max, Min T
-	Values   func(func(T))
-	Pairs    func(func(x, y T))
+	Small       func(v uint64) T
+	FromDec     func(s string) (T, error)
+	FromHex     func(s string) (T, error)
+	MustFromDec func(s string) T
+	MustFromHex func(s string) T
+	Zero        T
+	Max, Min    T
+	Values      func(func(T))
+	Pairs       func(func(x, y T))
 	// Narrow cuts y to width bits and extends it back, by zeros or by its sign
 	Narrow func(y T, width int) T
 	Shifts []int

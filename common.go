@@ -1,8 +1,12 @@
 package fat
 
 import (
+	"encoding/binary"
+	"math"
 	"math/big"
 	"math/bits"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/avpetkun/fat/internal/arch"
 )
@@ -34,6 +38,270 @@ func bigIsNeg(v *big.Int, w0 uint64) bool {
 		neg = v.Sign() < 0
 	}
 	return neg
+}
+
+// --- decimal digits -------------------------------------
+
+// notDigits8 returns 0 when all 8 bytes of x are ASCII digits
+func notDigits8(x uint64) uint64 {
+	return (x&0xF0F0F0F0F0F0F0F0 | (x+0x0606060606060606)&0xF0F0F0F0F0F0F0F0>>4) ^ 0x3333333333333333
+}
+
+// conv8 converts 8 ASCII digits to a number, the first in the low byte.
+// x must pass notDigits8, other bytes give garbage
+func conv8(x uint64) uint64 {
+	x = (x & 0x0F0F0F0F0F0F0F0F) * 2561 >> 8
+	x = (x & 0x00FF00FF00FF00FF) * 6553601 >> 16
+	return (x & 0x0000FFFF0000FFFF) * 42949672960001 >> 32
+}
+
+// pow10Table holds 10^i for every i that fits a uint64
+var pow10Table = [20]uint64{
+	1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+}
+
+// count64Digits returns the decimal digit count of v.
+// v must not be 0, which gives 19
+func count64Digits(v uint64) int {
+	t := &count64Table[bits.LeadingZeros64(v)&63]
+	nd := t.n
+	if v >= t.lim {
+		nd++
+	}
+	return nd
+}
+
+// count64Table holds, by leading zero count, the digit count of the least
+// value and the next power of ten
+var count64Table = func() (t [64]struct {
+	lim uint64
+	n   int
+}) {
+	for lz := range 64 {
+		v := uint64(1) << (63 - lz)
+		n := 1
+		for n < 20 && v >= pow10Table[n] {
+			n++
+		}
+		t[lz].n = n
+		t[lz].lim = math.MaxUint64
+		if n < 20 {
+			t[lz].lim = pow10Table[n]
+		}
+	}
+	return t
+}()
+
+// digits8 converts x to 8 ASCII digits, the first in the low byte.
+// x must be below 1e8, larger x gives garbage
+func digits8(x uint64) uint64 {
+	// 109951163 / 2^40 ~ 1/10000
+	hi := x * 109951163 >> 40
+	// two 4-digit halves side by side, hi + (x-hi*10000)<<32 as one msub
+	merged := x<<32 - hi*(10000<<32-1)
+	// 10486 / 2^20 ~ 1/100
+	top := ((merged * 10486) >> 20) & (0x7F<<32 | 0x7F)
+	// four 2-digit numbers in 16-bit lanes
+	hundreds := merged<<16 - top*(100<<16-1)
+	// 103 / 2^10 ~ 1/10
+	tens := (hundreds * 103) >> 10
+	tens &= 0xF<<48 | 0xF<<32 | 0xF<<16 | 0xF
+	return hundreds<<8 + 0x3030303030303030 - tens*(10<<8-1)
+}
+
+// --- hex digits -----------------------------------------
+
+// hexDigits8 packs 8 ASCII hex digits into 32 bits, the first on top.
+// x must pass notHexDigits8, other bytes give garbage
+func hexDigits8(x uint64) uint64 {
+	// a letter has bit 6 set and is worth its low nibble plus 9
+	t := x >> 6 & 0x0101010101010101
+	x = x&0x0F0F0F0F0F0F0F0F + t + t<<3
+	// nibbles close up pair by pair
+	x = (x | x>>4) & 0x00FF00FF00FF00FF
+	x = (x | x>>8) & 0x0000FFFF0000FFFF
+	return (x | x>>16) & 0xFFFFFFFF
+}
+
+// notHexDigits8 returns 0 when all 8 bytes of x are ASCII hex digits
+func notHexDigits8(x uint64) uint64 {
+	// 7-bit lanes, so an add cannot carry into the next byte
+	c := x & 0x7F7F7F7F7F7F7F7F
+	// bit 7 is set for '0'..'9'
+	d := (c + 0x5050505050505050) &^ (c + 0x4646464646464646)
+	// and for 'a'..'f' with the case folded
+	c |= 0x2020202020202020
+	l := (c + 0x1F1F1F1F1F1F1F1F) &^ (c + 0x1919191919191919)
+	return (x | ^(d | l)) & 0x8080808080808080
+}
+
+// hexChars8 spreads x < 2^32 into 8 lowercase hex digits, the first on top
+func hexChars8(x uint64) uint64 {
+	x = (x | x<<16) & 0x0000FFFF0000FFFF
+	x = (x | x<<8) & 0x00FF00FF00FF00FF
+	x = (x | x<<4) & 0x0F0F0F0F0F0F0F0F
+	// 1 in each byte holding 10..15, those skip 'a'-'0'-10 = 39 chars
+	m := (x + 0x0606060606060606) >> 4 & 0x0101010101010101
+	return x + 0x3030303030303030 + m*39
+}
+
+// --- decimal output -------------------------------------
+
+// 10^19 is the largest power of ten in a limb, its top bit is set
+const decimalChunk = 1e19
+
+// decimalChunkReciprocal is (2^128-1)/decimalChunk - 2^64, for div2by1
+const decimalChunkReciprocal = 0xd83c94fb6d2ac34a
+
+// prettyDecimal returns digits d with sep between groups of 3, a minus first
+// when neg; d must hold 1 to 78 digits
+func prettyDecimal(d []byte, neg bool, sep byte) string {
+	// 78 digits and 25 separators, a signed type has a digit less
+	var buf [103]byte
+	sign := 0
+	if neg {
+		sign = 1
+	}
+	// the first digit overwrites the minus when there is no sign
+	buf[0] = '-'
+	h := (len(d)-1)%3 + 1
+	j := sign + copy(buf[sign:], d[:h])
+	for i := h; i+2 < len(d); i += 3 {
+		buf[j], buf[j+1], buf[j+2], buf[j+3] = sep, d[i], d[i+1], d[i+2]
+		j += 4
+	}
+	return string(buf[:j])
+}
+
+// appendDecimalParts appends the sign, head and the 19-digit chunks c1 to cn.
+// It needs 0 < head < 1e19, chunks below 1e19 and n from 1 to 4,
+// other values give garbage
+func appendDecimalParts(dst []byte, neg bool, head, c1, c2, c3, c4 uint64, n int) []byte {
+	sign := 0
+	if neg {
+		sign = 1
+	}
+	nd := count64Digits(head)
+	size := sign + nd + 19*n
+	start := len(dst)
+	if cap(dst)-start < size {
+		dst = append(dst, make([]byte, size)...)
+	}
+	dst = dst[:start+size]
+	b := dst[start:]
+	// the first digit overwrites the sign when there is none
+	b[0] = '-'
+	// the head as in appendDecimal64, the chunks overwrite what it writes past
+	a := b[sign:]
+	v := head
+	switch {
+	case v < 1e8:
+		binary.LittleEndian.PutUint64(a, digits8(v)>>(8*uint(8-nd)&63))
+	case v < 1e16:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		e := a[nd-8:]
+		binary.LittleEndian.PutUint64(a, digits8(hi)>>(8*uint(16-nd)&63))
+		binary.LittleEndian.PutUint64(e, digits8(lo))
+	default:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		top := (hi >> 8) * 11529215047 >> 52
+		mid := hi - top*1e8
+		e := a[nd-16:]
+		binary.LittleEndian.PutUint64(a, digits8(top)>>(8*uint(24-nd)&63))
+		binary.LittleEndian.PutUint64(e, digits8(mid))
+		binary.LittleEndian.PutUint64(e[8:], digits8(lo))
+	}
+	b = b[sign+nd:]
+	switch n {
+	case 1:
+		put19Digits((*[19]byte)(b), c1)
+	case 2:
+		put38Digits((*[38]byte)(b), c1, c2)
+	case 3:
+		put57Digits((*[57]byte)(b), c1, c2, c3)
+	default:
+		put76Digits((*[76]byte)(b), c1, c2, c3, c4)
+	}
+	return dst
+}
+
+// put19Digits writes r < 1e19 as exactly 19 digits
+func put19Digits(b *[19]byte, r uint64) {
+	// both quotients straight from r, not one after the other
+	hi := r / 1e16
+	q := r / 1e8
+	// the 4th byte is overwritten by the next store
+	binary.LittleEndian.PutUint32(b[:], uint32(digits3(hi)))
+	binary.LittleEndian.PutUint64(b[3:], digits8(q-hi*1e8))
+	binary.LittleEndian.PutUint64(b[11:], digits8(r-q*1e8))
+}
+
+// put38Digits writes a and c < 1e19 as exactly 19 digits each
+func put38Digits(b *[38]byte, a, c uint64) {
+	ha, hc := a/1e16, c/1e16
+	qa, qc := a/1e8, c/1e8
+	// both 3-digit heads at once, in 32-bit lanes
+	h := digits3(ha | hc<<32)
+	// the 4th byte of a head is overwritten by the next store
+	binary.LittleEndian.PutUint32(b[:], uint32(h))
+	binary.LittleEndian.PutUint64(b[3:], digits8(qa-ha*1e8))
+	binary.LittleEndian.PutUint64(b[11:], digits8(a-qa*1e8))
+	binary.LittleEndian.PutUint32(b[19:], uint32(h>>32))
+	binary.LittleEndian.PutUint64(b[22:], digits8(qc-hc*1e8))
+	binary.LittleEndian.PutUint64(b[30:], digits8(c-qc*1e8))
+}
+
+// put57Digits writes a, c and e < 1e19 as exactly 19 digits each
+func put57Digits(b *[57]byte, a, c, e uint64) {
+	ha, hc, he := a/1e16, c/1e16, e/1e16
+	qa, qc, qe := a/1e8, c/1e8, e/1e8
+	// 3-digit heads two at a time, in 32-bit lanes
+	h := digits3(ha | hc<<32)
+	g := digits3(he)
+	// the 4th byte of a head is overwritten by the next store
+	binary.LittleEndian.PutUint32(b[:], uint32(h))
+	binary.LittleEndian.PutUint64(b[3:], digits8(qa-ha*1e8))
+	binary.LittleEndian.PutUint64(b[11:], digits8(a-qa*1e8))
+	binary.LittleEndian.PutUint32(b[19:], uint32(h>>32))
+	binary.LittleEndian.PutUint64(b[22:], digits8(qc-hc*1e8))
+	binary.LittleEndian.PutUint64(b[30:], digits8(c-qc*1e8))
+	binary.LittleEndian.PutUint32(b[38:], uint32(g))
+	binary.LittleEndian.PutUint64(b[41:], digits8(qe-he*1e8))
+	binary.LittleEndian.PutUint64(b[49:], digits8(e-qe*1e8))
+}
+
+// put76Digits writes a, c, e and f < 1e19 as exactly 19 digits each
+func put76Digits(b *[76]byte, a, c, e, f uint64) {
+	ha, hc, he, hf := a/1e16, c/1e16, e/1e16, f/1e16
+	qa, qc, qe, qf := a/1e8, c/1e8, e/1e8, f/1e8
+	// 3-digit heads two at a time, in 32-bit lanes
+	h := digits3(ha | hc<<32)
+	g := digits3(he | hf<<32)
+	// the 4th byte of a head is overwritten by the next store
+	binary.LittleEndian.PutUint32(b[:], uint32(h))
+	binary.LittleEndian.PutUint64(b[3:], digits8(qa-ha*1e8))
+	binary.LittleEndian.PutUint64(b[11:], digits8(a-qa*1e8))
+	binary.LittleEndian.PutUint32(b[19:], uint32(h>>32))
+	binary.LittleEndian.PutUint64(b[22:], digits8(qc-hc*1e8))
+	binary.LittleEndian.PutUint64(b[30:], digits8(c-qc*1e8))
+	binary.LittleEndian.PutUint32(b[38:], uint32(g))
+	binary.LittleEndian.PutUint64(b[41:], digits8(qe-he*1e8))
+	binary.LittleEndian.PutUint64(b[49:], digits8(e-qe*1e8))
+	binary.LittleEndian.PutUint32(b[57:], uint32(g>>32))
+	binary.LittleEndian.PutUint64(b[60:], digits8(qf-hf*1e8))
+	binary.LittleEndian.PutUint64(b[68:], digits8(f-qf*1e8))
+}
+
+// digits3 converts x < 1000 in each 32-bit lane to 3 ASCII digits and a 0
+func digits3(x uint64) uint64 {
+	// 41 / 2^12 ~ 1/100, 103 / 2^10 ~ 1/10, no lane overflows
+	h := (x * 41 >> 12) & (0xF<<32 | 0xF)
+	r := x - h*100
+	t := (r * 103 >> 10) & (0xF<<32 | 0xF)
+	return h | t<<8 | (r-t*10)<<16 | 0x00303030_00303030
 }
 
 // div2by1 returns the quotient and remainder of <u1, u0> / d by v,
@@ -103,6 +371,227 @@ func reciprocal2by1(d uint64) uint64 {
 	_, b := bits.Sub64(^d, lo, 0)
 	v, _ = bits.Sub64(v, hi+d, b)
 	return v
+}
+
+// appendDecimal64 appends decimal v
+func appendDecimal64(dst []byte, v uint64) []byte {
+	nd := count64Digits(v | 1)
+	n := len(dst)
+	if cap(dst)-n < nd {
+		// append of make allocates twice without optimizations; nd <= 20
+		var zeros [24]byte
+		dst = append(dst, zeros[:nd]...)[:n]
+	}
+	dst = dst[:n+nd]
+	a := dst[n:]
+	// branch on the value, nd is ready much later
+	switch {
+	case v < 1000:
+		// 41 / 2^12 ~ 1/100, 103 / 2^10 ~ 1/10
+		h := v * 41 >> 12
+		r := v - h*100
+		t := r * 103 >> 10
+		// one bounds check for all three stores
+		_ = a[nd-1]
+		// a leading zero is overwritten by the next digit
+		a[0] = byte('0' + h)
+		a[(nd-1)>>1] = byte('0' + t)
+		a[nd-1] = byte('0' + r - t*10)
+	case v < 1e8:
+		// drop leading zeros
+		x := digits8(v) >> (8 * uint(8-nd) & 63)
+		// two overlapping 4-byte stores
+		b := a[nd-4:]
+		binary.LittleEndian.PutUint32(a, uint32(x))
+		binary.LittleEndian.PutUint32(b, uint32(x>>(8*uint(nd-4)&63)))
+	case v < 1e16:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		// tail of the first block is overwritten by the second
+		b := a[nd-8:]
+		binary.LittleEndian.PutUint64(a, digits8(hi)>>(8*uint(16-nd)&63))
+		binary.LittleEndian.PutUint64(b, digits8(lo))
+	default:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		// 1e8 = 2^8 * 390625, 11529215047 / 2^52 ~ 1/390625
+		top := (hi >> 8) * 11529215047 >> 52
+		mid := hi - top*1e8
+		b := a[nd-16:]
+		binary.LittleEndian.PutUint64(a, digits8(top)>>(8*uint(24-nd)&63))
+		binary.LittleEndian.PutUint64(b, digits8(mid))
+		binary.LittleEndian.PutUint64(b[8:], digits8(lo))
+	}
+	return dst
+}
+
+// appendDecimalSign64 appends a minus when neg, then v
+func appendDecimalSign64(dst []byte, neg bool, v uint64) []byte {
+	sign := 0
+	if neg {
+		sign = 1
+	}
+	// v|1 has the digit count of v, and 1 digit for zero
+	nd := count64Digits(v | 1)
+	size := sign + nd
+	start := len(dst)
+	if cap(dst)-start < size {
+		dst = append(dst, make([]byte, size)...)
+	}
+	dst = dst[:start+size]
+	b := dst[start:]
+	// the first digit overwrites the sign when there is none
+	b[0] = '-'
+	// the switch of appendDecimal64 written out, a call less
+	a := b[sign:]
+	switch {
+	case v < 1000:
+		h := v * 41 >> 12
+		r := v - h*100
+		t := r * 103 >> 10
+		_ = a[nd-1]
+		a[0] = byte('0' + h)
+		a[(nd-1)>>1] = byte('0' + t)
+		a[nd-1] = byte('0' + r - t*10)
+	case v < 1e8:
+		x := digits8(v) >> (8 * uint(8-nd) & 63)
+		e := a[nd-4:]
+		binary.LittleEndian.PutUint32(a, uint32(x))
+		binary.LittleEndian.PutUint32(e, uint32(x>>(8*uint(nd-4)&63)))
+	case v < 1e16:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		e := a[nd-8:]
+		binary.LittleEndian.PutUint64(a, digits8(hi)>>(8*uint(16-nd)&63))
+		binary.LittleEndian.PutUint64(e, digits8(lo))
+	default:
+		hi := v / 1e8
+		lo := v - hi*1e8
+		top := (hi >> 8) * 11529215047 >> 52
+		mid := hi - top*1e8
+		e := a[nd-16:]
+		binary.LittleEndian.PutUint64(a, digits8(top)>>(8*uint(24-nd)&63))
+		binary.LittleEndian.PutUint64(e, digits8(mid))
+		binary.LittleEndian.PutUint64(e[8:], digits8(lo))
+	}
+	return dst
+}
+
+// --- decimal input --------------------------------------
+
+// sciParts splits s of the form m e n at its last e or E for FromDec and
+// Scan: n is decimal digits after an optional plus, not empty, and m all
+// before the e, left to the parser to check. It goes from the end, as n is
+// short and m can be long. An n past 999 comes back as 999,
+// beyond every power of ten that fits
+func sciParts(s []byte) (m []byte, n int, ok bool) {
+	k := len(s)
+	for k > 0 && s[k-1]-'0' <= 9 {
+		k--
+	}
+	j := k
+	if j > 0 && s[j-1] == '+' {
+		j--
+	}
+	if k == len(s) || j == 0 || s[j-1]|0x20 != 'e' {
+		return nil, 0, false
+	}
+	for _, c := range s[k:] {
+		n = min(n*10+int(c-'0'), 999)
+	}
+	return s[:j-1], n, true
+}
+
+// isMinusZero reports whether m is a minus and zeros only, as -0 or -000
+func isMinusZero(m []byte) bool {
+	if len(m) < 2 || m[0] != '-' {
+		return false
+	}
+	for _, c := range m[1:] {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseDecimalUint64 parses decimal s with no sign, false when it cannot.
+// No error value: building one would cost a call and a frame on every parse
+func parseDecimalUint64(s []byte) (uint64, bool) {
+	n := len(s)
+	if n <= 8 {
+		if n == 0 {
+			return 0, false
+		}
+		// chars go to the top n bytes
+		sh := 8 * uint(8-n) & 63
+		var x uint64
+		if n >= 4 {
+			// two overlapping 4-byte loads
+			x = uint64(binary.LittleEndian.Uint32(s))<<sh | uint64(binary.LittleEndian.Uint32(s[n-4:]))<<32
+		} else {
+			// first, middle and last byte cover 1..3 chars
+			x = (uint64(s[0]) | uint64(s[(n-1)>>1])<<(8*uint((n-1)>>1)) | uint64(s[n-1])<<(8*uint(n-1))) << sh
+		}
+		// left-pad with '0' to a full block
+		x |= 0x3030303030303030 &^ (^uint64(0) << sh)
+		if notDigits8(x) != 0 {
+			return 0, false
+		}
+		return conv8(x), true
+	}
+	if n <= 16 {
+		// two overlapping blocks
+		a := binary.LittleEndian.Uint64(s)
+		b := binary.LittleEndian.Uint64(s[n-8:])
+		if notDigits8(a)|notDigits8(b) != 0 {
+			return 0, false
+		}
+		// drop digits shared with a
+		b &= ^uint64(0) << (8 * uint(16-n))
+		return conv8(a)*pow10Table[n-8] + conv8(b), true
+	}
+	a := binary.LittleEndian.Uint64(s)
+	b := binary.LittleEndian.Uint64(s[8:])
+	if n <= 19 {
+		c := binary.LittleEndian.Uint64(s[n-8:])
+		if notDigits8(a)|notDigits8(b)|notDigits8(c) != 0 {
+			return 0, false
+		}
+		// drop digits shared with b
+		c &= ^uint64(0) << (8 * uint(24-n))
+		return (conv8(a)*1e8+conv8(b))*pow10Table[n-16] + conv8(c), true
+	}
+	// first 20 chars, the last block adds 4 digits
+	c := binary.LittleEndian.Uint64(s[12:])
+	if notDigits8(a)|notDigits8(b)|notDigits8(c) != 0 {
+		return 0, false
+	}
+	hi, lo := bits.Mul64(conv8(a)*1e8+conv8(b), 1e4)
+	v, carry := bits.Add64(lo, conv8(c&^0xFFFFFFFF), 0)
+	rest := s[20:]
+	if hi|carry != 0 {
+		return 0, false
+	}
+	// more digits fit only after leading zeros
+	var d byte
+	var m uint64
+	for _, ch := range rest {
+		d = ch - '0'
+		if d > 9 {
+			return 0, false
+		}
+		// v*10 must not wrap
+		if v > math.MaxUint64/10 {
+			return 0, false
+		}
+		m = v*10 + uint64(d)
+		if m < v {
+			return 0, false
+		}
+		v = m
+	}
+	return v, true
 }
 
 // --- roots ----------------------------------------------
@@ -294,6 +783,124 @@ var pow10x256 = func() (p [78]Uint256) {
 	}
 	return
 }()
+
+// --- JSON text ------------------------------------------
+
+// isNegativeText reports whether s is a negative number for ErrNegative.
+// -0 is not negative
+func isNegativeText[S string | []byte](s S) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	s = s[1:]
+	if len(s) > 2 && s[0] == '0' && s[1]|0x20 == 'x' {
+		s = s[2:]
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonUnescape appends the text of s, the inside of a JSON string, to dst
+// when s has escapes. It is false for s with none and for s that is not
+// valid JSON, as encoding/json would fail it; bad UTF-8 turns to U+FFFD there
+func jsonUnescape[S string | []byte](dst []byte, s S) ([]byte, bool) {
+	i := 0
+	for i < len(s) && s[i] != '\\' {
+		i++
+	}
+	if i == len(s) {
+		return nil, false
+	}
+	// written out, not the decoder of encoding/json: no reflection, no string
+	// and no copy of s, the text goes to a buffer of the caller on its stack
+	b := dst
+	for j := 0; j < len(s); {
+		c := s[j]
+		if c < utf8.RuneSelf && c != '\\' {
+			if c < 0x20 || c == '"' {
+				return nil, false
+			}
+			b = append(b, c)
+			j++
+			continue
+		}
+		if c >= utf8.RuneSelf {
+			r, n := decodeRune(s[j:])
+			b = utf8.AppendRune(b, r)
+			j += n
+			continue
+		}
+		if j+1 == len(s) {
+			return nil, false
+		}
+		c, j = s[j+1], j+2
+		switch c {
+		case '"', '\\', '/':
+			b = append(b, c)
+		case 'b':
+			b = append(b, '\b')
+		case 'f':
+			b = append(b, '\f')
+		case 'n':
+			b = append(b, '\n')
+		case 'r':
+			b = append(b, '\r')
+		case 't':
+			b = append(b, '\t')
+		case 'u':
+			r := jsonHex4(s[j:])
+			if r < 0 {
+				return nil, false
+			}
+			j += 4
+			if utf16.IsSurrogate(r) {
+				// a pair as one rune, a lone half as U+FFFD, as encoding/json
+				r2 := rune(-1)
+				if len(s)-j >= 6 && s[j] == '\\' && s[j+1] == 'u' {
+					r2 = jsonHex4(s[j+2:])
+				}
+				if r = utf16.DecodeRune(r, r2); r != utf8.RuneError {
+					j += 6
+				}
+			}
+			b = utf8.AppendRune(b, r)
+		default:
+			return nil, false
+		}
+	}
+	return b, true
+}
+
+// jsonHex4 returns the rune of the 4 hex digits that start s, else -1
+func jsonHex4[S string | []byte](s S) rune {
+	if len(s) < 4 {
+		return -1
+	}
+	r := rune(0)
+	for i := range 4 {
+		c := s[i]
+		switch {
+		case c-'0' <= 9:
+			c -= '0'
+		case c|0x20-'a' <= 5:
+			c = c | 0x20 - 'a' + 10
+		default:
+			return -1
+		}
+		r = r<<4 | rune(c)
+	}
+	return r
+}
+
+// decodeRune is utf8.DecodeRuneInString for bytes or a string.
+// The conversion takes at most 4 bytes, so it copies them to the stack
+func decodeRune[S string | []byte](s S) (rune, int) {
+	return utf8.DecodeRuneInString(string(s[:min(len(s), utf8.UTFMax)]))
+}
 
 // --- Montgomery -----------------------------------------
 

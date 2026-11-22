@@ -13,7 +13,7 @@ import (
 // TestUint128Convert checks the conversions to other types and big.Int
 func TestUint128Convert(t *testing.T) {
 	t.Parallel()
-	require.Big(t, new(big.Int).Sub(Two128, Big1), RefU128(MaxUint128()))
+	require.Equal(t, "340282366920938463463374607431768211455", MaxUint128().String())
 
 	Values128(func(x Uint128) {
 		xb := RefU128(x)
@@ -60,9 +60,14 @@ func TestUint128Convert(t *testing.T) {
 		// the constructor sets every limb
 		require.Equal(t, Uint128{x.L0, 0}, NewUint128(x.L0))
 	})
+}
 
-	// an error with the input quotes it
-	require.Equal(t, `fat.Uint128FromHex: negative value "-1"`, ErrNegative{"Uint128FromHex", "-1"}.Error())
+// TestUint128Encoding checks the 16-byte binary form, gob and JSON
+func TestUint128Encoding(t *testing.T) {
+	t.Parallel()
+	RunBinaryLengths(t, kU128)
+
+	RunJSON(t, kU128)
 }
 
 // TestUint128Arith checks Add, Sub, Mul and the bitwise ops with big.Int
@@ -735,6 +740,17 @@ func BenchmarkUint128Convert(b *testing.B) {
 	})
 }
 
+// BenchmarkUint128Decimal measures decimal output and parsing, mixed lengths
+func BenchmarkUint128Decimal(b *testing.B) {
+	in := benchU128()
+	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
+		x := in.u128s
+		for i := range b.N {
+			sinkU128, _ = Uint128FromDec(x[i&BenchMask])
+		}
+	})
+}
+
 // narrowUint128 cuts y to width bits, zeroing the limb above
 func narrowUint128(y Uint128, width int) Uint128 {
 	if width == 64 {
@@ -748,6 +764,7 @@ var kU128 = Kind[Uint128]{
 	Name: "Uint128", Bits: 128,
 	Ref: RefU128, Wrap: WrapU128, Fits: FitsU128,
 	FromBig: MustUint128FromBig, FromFloat64: Uint128FromFloat64, MustFromFloat64: MustUint128FromFloat64, Small: NewUint128,
+	FromDec: Uint128FromDec, FromHex: Uint128FromHex, MustFromDec: MustUint128FromDec, MustFromHex: MustUint128FromHex,
 	Max:    MaxUint128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowUint128,
@@ -758,6 +775,21 @@ var kU128 = Kind[Uint128]{
 		Add: Uint128.Add64, Sub: Uint128.Sub64, Mul: Uint128.Mul64,
 		Addo: Uint128.Add64o, Subo: Uint128.Sub64o, Mulo: Uint128.Mul64o, Addu: Uint128.Add64u, Subu: Uint128.Sub64u, Mulu: Uint128.Mul64u,
 	},
+}
+
+// TestUint128ParseErrors checks FromDec on malformed and out of range input
+func TestUint128ParseErrors(t *testing.T) {
+	RunParseErrors(t, kU128)
+	// the JSON forms of the text, as UnmarshalJSON will give them
+	for _, c := range []struct{ text, want string }{
+		{``, `fat.Uint128.UnmarshalJSON: empty JSON`},
+		{`1x`, `fat.Uint128.UnmarshalJSON: cannot parse 1x: invalid digit 'x' at offset 1`},
+		{`0x1`, `fat.Uint128.UnmarshalJSON: cannot parse 0x1: 0x outside quotes`},
+		{`"1x"`, `fat.Uint128.UnmarshalJSON: cannot parse "1x": invalid digit 'x' at offset 1`},
+		{`"1\u0078"`, `fat.Uint128.UnmarshalJSON: cannot parse "1\u0078": invalid digit 'x' at offset 1`},
+	} {
+		require.Equal(t, c.want, ErrParse{"Uint128.UnmarshalJSON", c.text}.Error())
+	}
 }
 
 // TestUint128Bits checks BitLen, Not, shifts, Bit and WithBit with big.Int
@@ -774,6 +806,15 @@ func TestUint128GCD(t *testing.T) {
 // TestUint128ModInverse checks ModInverse with big.Int
 func TestUint128ModInverse(t *testing.T) { RunModInverse(t, kU128, Uint128.ModInverse) }
 
+// TestUint128Decimal checks decimal output and parsing with big.Int
+func TestUint128Decimal(t *testing.T) { RunDecimal(t, kU128) }
+
+// TestUint128Sci checks the form m e n of FromDec
+func TestUint128Sci(t *testing.T) { RunSci(t, kU128) }
+
+// TestUint128Hex checks hex output and parsing with big.Int
+func TestUint128Hex(t *testing.T) { RunHex(t, kU128) }
+
 // TestUint128Ops64 checks the methods with a uint64 operand with big.Int
 func TestUint128Ops64(t *testing.T) { RunOps64(t, kU128) }
 
@@ -785,6 +826,9 @@ func TestUint128BitArgs(t *testing.T) { RunBitArgs(t, kU128) }
 
 // TestUint128HugeShifts checks that a shift past 128 bits leaves zero
 func TestUint128HugeShifts(t *testing.T) { RunHugeShifts(t, kU128) }
+
+// TestUint128ErrorText checks that parse errors name the type and the input
+func TestUint128ErrorText(t *testing.T) { RunErrorText(t, kU128) }
 
 // TestUint128PanicText checks that every panic names the method
 func TestUint128PanicText(t *testing.T) { RunPanicText(t, kU128) }

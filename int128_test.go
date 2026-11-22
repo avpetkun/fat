@@ -63,6 +63,14 @@ func TestInt128Convert(t *testing.T) {
 	})
 }
 
+// TestInt128Encoding checks the 16-byte binary form, gob and JSON
+func TestInt128Encoding(t *testing.T) {
+	t.Parallel()
+	RunBinaryLengths(t, kI128)
+
+	RunJSON(t, kI128)
+}
+
 // TestInt128Arith checks Add, Sub, Mul and the bitwise ops with big.Int
 func TestInt128Arith(t *testing.T) {
 	t.Parallel()
@@ -388,11 +396,23 @@ func benchBigs128(x []Int128) []*big.Int {
 	return r
 }
 
+// BenchmarkInt128Decimal measures decimal output and parsing, mixed lengths
+func BenchmarkInt128Decimal(b *testing.B) {
+	in := benchI128()
+	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
+		x := in.i128s
+		for i := range b.N {
+			sinkI128, _ = Int128FromDec(x[i&BenchMask])
+		}
+	})
+}
+
 // kI128 describes Int128 to the shared checks of testutil
 var kI128 = Kind[Int128]{
 	Name: "Int128", Bits: 128, Signed: true,
 	Ref: RefI128, Wrap: WrapI128, Fits: FitsI128,
 	FromBig: MustInt128FromBig, FromFloat64: Int128FromFloat64, MustFromFloat64: MustInt128FromFloat64, Small: func(v uint64) Int128 { return NewInt128(int64(v)) },
+	FromDec: Int128FromDec, FromHex: Int128FromHex, MustFromDec: MustInt128FromDec, MustFromHex: MustInt128FromHex,
 	Max: MaxInt128(), Min: MinInt128(),
 	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowInt128,
@@ -607,6 +627,9 @@ func TestInt128MulDiv(t *testing.T) {
 	}
 }
 
+// TestInt128ParseErrors checks FromDec on malformed and out of range input
+func TestInt128ParseErrors(t *testing.T) { RunParseErrors(t, kI128) }
+
 // TestInt128Bits checks BitLen, Not, shifts, Bit and WithBit with big.Int
 func TestInt128Bits(t *testing.T) { RunBits(t, kI128) }
 
@@ -617,6 +640,15 @@ func TestInt128Cmp(t *testing.T) { RunCmp(t, kI128) }
 func TestInt128GCD(t *testing.T) {
 	RunGCD(t, kI128, func(x, y Int128) *big.Int { return RefU128(x.GCD(y)) })
 }
+
+// TestInt128Decimal checks decimal output and parsing with big.Int
+func TestInt128Decimal(t *testing.T) { RunDecimal(t, kI128) }
+
+// TestInt128Sci checks the form m e n of FromDec
+func TestInt128Sci(t *testing.T) { RunSci(t, kI128) }
+
+// TestInt128Hex checks hex output and parsing with big.Int
+func TestInt128Hex(t *testing.T) { RunHex(t, kI128) }
 
 // TestInt128Ops64 checks the methods with an int64 operand with big.Int
 func TestInt128Ops64(t *testing.T) { RunOps64(t, kI128) }
@@ -634,6 +666,9 @@ func TestInt128BitArgs(t *testing.T) { RunBitArgs(t, kI128) }
 
 // TestInt128HugeShifts checks shifts past 128 bits: zero, or the sign for Rsh
 func TestInt128HugeShifts(t *testing.T) { RunHugeShifts(t, kI128) }
+
+// TestInt128ErrorText checks that parse errors name the type and the input
+func TestInt128ErrorText(t *testing.T) { RunErrorText(t, kI128) }
 
 // TestInt128PanicText checks that every panic names the method
 func TestInt128PanicText(t *testing.T) { RunPanicText(t, kI128) }

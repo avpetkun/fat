@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/bits"
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 // TestUint256Convert checks conversions to the other types and big.Int
 func TestUint256Convert(t *testing.T) {
 	t.Parallel()
-	require.Big(t, new(big.Int).Sub(Two256, Big1), RefU256(MaxUint256()))
+	require.Equal(t, "115792089237316195423570985008687907853269984665640564039457584007913129639935", MaxUint256().String())
 
 	Values256(func(x Uint256) {
 		xb := RefU256(x)
@@ -68,6 +69,59 @@ func TestUint256Convert(t *testing.T) {
 		require.Equal(t, Uint256{x.L0, 0, 0, 0}, NewUint256(x.L0))
 		require.Equal(t, Uint256{x.L0, x.L1, 0, 0}, Uint128{x.L0, x.L1}.Uint256())
 	})
+}
+
+// TestUint256ParseLengths checks FromDec against big.Int at 1 to 80 digits,
+// with a bad symbol at a random place too
+func TestUint256ParseLengths(t *testing.T) {
+	t.Parallel()
+	r := rand.New(rand.NewSource(4))
+	for n := 1; n <= 80; n++ {
+		for range 200 {
+			d := make([]byte, n)
+			for i := range d {
+				d[i] = '0' + byte(r.Intn(10))
+			}
+			// nines and zeros at the window edges
+			switch r.Intn(4) {
+			case 0:
+				copy(d[n/2:], strings.Repeat("9", n))
+			case 1:
+				copy(d[n/2:], strings.Repeat("0", n))
+			}
+			d[0] = '1' + byte(r.Intn(9))
+			s := string(d)
+			t := On(t, s)
+			want, _ := new(big.Int).SetString(s, 10)
+			v, err := Uint256FromDec(s)
+			require.Equal(t, FitsU256(want), err == nil)
+			if err == nil {
+				require.Big(t, want, RefU256(v))
+			} else {
+				require.True(t, v.IsZero())
+			}
+			if n > 78 {
+				continue
+			}
+			// a bad symbol fails at any length
+			for _, c := range []byte{'/', ':', 'x', 0, 0xFF} {
+				i := r.Intn(n)
+				d[i], c = c, d[i]
+				v, err := Uint256FromDec(string(d))
+				require.Error(On(t, i), err)
+				require.True(t, v.IsZero())
+				d[i] = c
+			}
+		}
+	}
+}
+
+// TestUint256Encoding checks the binary, gob and JSON forms and round trips
+func TestUint256Encoding(t *testing.T) {
+	t.Parallel()
+	RunBinaryLengths(t, kU256)
+
+	RunJSON(t, kU256)
 }
 
 // TestUint256Arith checks Add, Sub, Mul and the bit ops against big.Int,
@@ -802,6 +856,53 @@ func BenchmarkUint256(b *testing.B) {
 	})
 }
 
+// BenchmarkUint256Hex measures FromHex, Hex and AppendHex on mixed lengths
+func BenchmarkUint256Hex(b *testing.B) {
+	in := benchU256()
+	mixed := make([]string, len(in.u256))
+	for i, x := range in.u256 {
+		mixed[i] = HexPrefixed(RefU256(x))
+	}
+	b.Run("op=FromHex/digits=mixed", func(b *testing.B) {
+		x := mixed
+		for i := range b.N {
+			sinkU256, _ = Uint256FromHex(x[i&BenchMask])
+		}
+	})
+	b.Run("op=Hex/digits=mixed", func(b *testing.B) {
+		x := make([]Uint256, len(mixed))
+		for i, s := range mixed {
+			x[i], _ = Uint256FromHex(s)
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			SinkString = x[i&BenchMask].Hex()
+		}
+	})
+	b.Run("op=AppendHex/digits=mixed", func(b *testing.B) {
+		x := make([]Uint256, len(mixed))
+		for i, s := range mixed {
+			x[i], _ = Uint256FromHex(s)
+		}
+		buf := make([]byte, 0, 100)
+		for i := range b.N {
+			buf = x[i&BenchMask].AppendHex(buf[:0])
+		}
+		SinkBytes = buf
+	})
+}
+
+// BenchmarkUint256Decimal measures AppendText and FromDec on mixed lengths
+func BenchmarkUint256Decimal(b *testing.B) {
+	in := benchU256()
+	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
+		x := in.u256s
+		for i := range b.N {
+			sinkU256, _ = Uint256FromDec(x[i&BenchMask])
+		}
+	})
+}
+
 // BenchmarkUint256Big measures the big.Int and float64 conversions both ways
 func BenchmarkUint256Big(b *testing.B) {
 	in := benchU256()
@@ -854,6 +955,7 @@ var kU256 = Kind[Uint256]{
 	Name: "Uint256", Bits: 256,
 	Ref: RefU256, Wrap: WrapU256, Fits: FitsU256,
 	FromBig: MustUint256FromBig, FromFloat64: Uint256FromFloat64, MustFromFloat64: MustUint256FromFloat64, Small: NewUint256,
+	FromDec: Uint256FromDec, FromHex: Uint256FromHex, MustFromDec: MustUint256FromDec, MustFromHex: MustUint256FromHex,
 	Max:    MaxUint256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowUint256,
@@ -869,6 +971,9 @@ var kU256 = Kind[Uint256]{
 	},
 }
 
+// TestUint256ParseErrors checks FromDec on malformed and out of range text
+func TestUint256ParseErrors(t *testing.T) { RunParseErrors(t, kU256) }
+
 // TestUint256Bits checks BitLen, Not, shifts, Bit and WithBit against big.Int
 func TestUint256Bits(t *testing.T) { RunBits(t, kU256) }
 
@@ -883,6 +988,15 @@ func TestUint256GCD(t *testing.T) {
 // TestUint256ModInverse checks ModInverse with big.Int
 func TestUint256ModInverse(t *testing.T) { RunModInverse(t, kU256, Uint256.ModInverse) }
 
+// TestUint256Decimal checks decimal text both ways against big.Int
+func TestUint256Decimal(t *testing.T) { RunDecimal(t, kU256) }
+
+// TestUint256Sci checks the form m e n of FromDec
+func TestUint256Sci(t *testing.T) { RunSci(t, kU256) }
+
+// TestUint256Hex checks hex text both ways against big.Int
+func TestUint256Hex(t *testing.T) { RunHex(t, kU256) }
+
 // TestUint256Ops64 checks the methods with a uint64 operand against big.Int
 func TestUint256Ops64(t *testing.T) { RunOps64(t, kU256) }
 
@@ -894,6 +1008,9 @@ func TestUint256BitArgs(t *testing.T) { RunBitArgs(t, kU256) }
 
 // TestUint256HugeShifts checks that shifts past the width leave zero
 func TestUint256HugeShifts(t *testing.T) { RunHugeShifts(t, kU256) }
+
+// TestUint256ErrorText checks that parse errors name the type and the input
+func TestUint256ErrorText(t *testing.T) { RunErrorText(t, kU256) }
 
 // TestUint256PanicText checks that every panic names its func or method
 func TestUint256PanicText(t *testing.T) { RunPanicText(t, kU256) }

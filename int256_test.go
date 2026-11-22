@@ -66,6 +66,14 @@ func TestInt256Convert(t *testing.T) {
 	})
 }
 
+// TestInt256Encoding checks the binary, gob and JSON forms and round trips
+func TestInt256Encoding(t *testing.T) {
+	t.Parallel()
+	RunBinaryLengths(t, kI256)
+
+	RunJSON(t, kI256)
+}
+
 // TestInt256Arith checks Add, Sub, Mul and the bit ops against big.Int,
 // with 256- and 128-bit operands in the panicking, u and o forms
 func TestInt256Arith(t *testing.T) {
@@ -452,6 +460,23 @@ func BenchmarkInt256(b *testing.B) {
 	})
 }
 
+// BenchmarkInt256Decimal measures decimal text both ways on mixed lengths
+func BenchmarkInt256Decimal(b *testing.B) {
+	in := benchI256()
+	b.Run("op=FromDec/digits=mixed", func(b *testing.B) {
+		x := in.i256s
+		for i := range b.N {
+			sinkI256, _ = Int256FromDec(x[i&BenchMask])
+		}
+	})
+	b.Run("op=String/alloc", func(b *testing.B) {
+		x := in.i256
+		for i := range b.N {
+			SinkString = x[i&BenchMask].String()
+		}
+	})
+}
+
 // BenchmarkInt256Convert measures Sign, big.Int, float64 and binary forms
 func BenchmarkInt256Convert(b *testing.B) {
 	in := benchI256()
@@ -514,6 +539,7 @@ var kI256 = Kind[Int256]{
 	Name: "Int256", Bits: 256, Signed: true,
 	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
 	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64, Small: func(v uint64) Int256 { return NewInt256(int64(v)) },
+	FromDec: Int256FromDec, FromHex: Int256FromHex, MustFromDec: MustInt256FromDec, MustFromHex: MustInt256FromHex,
 	Max: MaxInt256(), Min: MinInt256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowInt256,
@@ -765,6 +791,9 @@ func TestInt256MulDiv(t *testing.T) {
 	}
 }
 
+// TestInt256ParseErrors checks FromDec on malformed and out of range text
+func TestInt256ParseErrors(t *testing.T) { RunParseErrors(t, kI256) }
+
 // TestInt256Bits checks BitLen, Not, shifts, Bit and WithBit against big.Int
 func TestInt256Bits(t *testing.T) { RunBits(t, kI256) }
 
@@ -775,6 +804,15 @@ func TestInt256Cmp(t *testing.T) { RunCmp(t, kI256) }
 func TestInt256GCD(t *testing.T) {
 	RunGCD(t, kI256, func(x, y Int256) *big.Int { return RefU256(x.GCD(y)) })
 }
+
+// TestInt256Decimal checks decimal text both ways against big.Int
+func TestInt256Decimal(t *testing.T) { RunDecimal(t, kI256) }
+
+// TestInt256Sci checks the form m e n of FromDec
+func TestInt256Sci(t *testing.T) { RunSci(t, kI256) }
+
+// TestInt256Hex checks hex text both ways against big.Int
+func TestInt256Hex(t *testing.T) { RunHex(t, kI256) }
 
 // TestInt256Ops64 checks the methods with an int64 operand against big.Int
 func TestInt256Ops64(t *testing.T) { RunOps64(t, kI256) }
@@ -792,6 +830,9 @@ func TestInt256BitArgs(t *testing.T) { RunBitArgs(t, kI256) }
 
 // TestInt256HugeShifts checks that shifts past the width leave 0 or the sign
 func TestInt256HugeShifts(t *testing.T) { RunHugeShifts(t, kI256) }
+
+// TestInt256ErrorText checks that parse errors name the type and the input
+func TestInt256ErrorText(t *testing.T) { RunErrorText(t, kI256) }
 
 // TestInt256PanicText checks that every panic names its func or method
 func TestInt256PanicText(t *testing.T) { RunPanicText(t, kI256) }

@@ -22,6 +22,8 @@ var (
 	SinkUint   uint
 	SinkUint64 uint64
 	SinkFloat  float64
+	SinkString string
+	SinkBytes  []byte
 	SinkBig    *big.Int
 )
 
