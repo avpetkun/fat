@@ -1,0 +1,4 @@
+github.com/holiman/uint256 v1.3.3-0.20261117190858-760655f5bc8b h1:9CAymvgHy/FiF0DsCeTuFYYBIuzSxUMsqHczDuJOQIE=
+github.com/holiman/uint256 v1.3.3-0.20261117190858-760655f5bc8b/go.mod h1:EOMSn4q6Nyt9P6efbI3bueV4e1b3dGlUCXeiRV4ng7E=
+lukechampine.com/uint128 v1.3.1-0.20241116023720-689f0db84623 h1:CWs0fgjzVF5G4bZKErEhScg23yFId54UVuCh80FtTt4=
+lukechampine.com/uint128 v1.3.1-0.20241116023720-689f0db84623/go.mod h1:c4eWIwlEGaxC/+H1VguhU4PHXNWDCDMUlWdIWl2j1gk=
