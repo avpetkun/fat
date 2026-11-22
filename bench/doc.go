@@ -15,5 +15,11 @@
 // A pair is only of operations with the same result on these inputs: holiman
 // wraps, so fat runs its wrapping form, lukechampine checks as fat does,
 // and math/big runs where the result fits. TestAgree checks that every side
-// gives the same values and leaves its inputs as they were
+// gives the same values and leaves its inputs as they were.
+//
+// rust/ compares Uint128 and Int128 + - * / % with Rust's u128 and i128 on
+// the same inputs, the Rust side checked against fat's results first.
+// It needs cargo and benchstat:
+//
+//	bench/rust/run.sh [count] [milliseconds]
 package bench
