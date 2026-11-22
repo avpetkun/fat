@@ -427,6 +427,18 @@ func appendDecimal64(dst []byte, v uint64) []byte {
 	return dst
 }
 
+// formatInt64 returns decimal v, for error texts
+func formatInt64(v int64) string {
+	// a minus and 19 digits, string copies them out
+	var buf [20]byte
+	neg := v < 0
+	u := uint64(v)
+	if neg {
+		u = -u
+	}
+	return string(appendDecimalSign64(buf[:0], neg, u))
+}
+
 // appendDecimalSign64 appends a minus when neg, then v
 func appendDecimalSign64(dst []byte, neg bool, v uint64) []byte {
 	sign := 0

@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -11,6 +12,7 @@ var (
 	_ error = ErrNegative{}
 	_ error = ErrRange("")
 	_ error = ErrBinary{}
+	_ error = ErrScan{}
 )
 
 // ErrParse is text a func or method cannot parse, Error tells why
@@ -67,6 +69,20 @@ func (e ErrBinary) Error() string {
 	b := append(append(append(buf[:0], "fat."...), e.fn...), ": cannot parse "...)
 	b = append(appendDecimal64(b, uint64(e.n)), " bytes, want "...)
 	return string(appendDecimal64(b, uint64(e.want)))
+}
+
+// ErrScan is a Scan source the types do not take: NULL or another type
+type ErrScan struct{ typ, text string }
+
+// Error names the method and the source
+func (e ErrScan) Error() string { return "fat." + e.typ + ": " + e.text }
+
+// newScanError names what Scan does not take: NULL or the type of src
+func newScanError(typ string, src any) error {
+	if src == nil {
+		return ErrScan{typ, "cannot scan NULL"}
+	}
+	return ErrScan{typ, fmt.Sprintf("cannot scan %T", src)}
 }
 
 // appendErrReason appends why s fails the parser of fn.

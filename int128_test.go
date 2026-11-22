@@ -736,11 +736,19 @@ func TestInt128GCD(t *testing.T) {
 // TestInt128Decimal checks decimal output and parsing with big.Int
 func TestInt128Decimal(t *testing.T) { RunDecimal(t, kI128) }
 
-// TestInt128Sci checks the form m e n of FromDec
+// TestInt128Sci checks the form m e n of FromDec and Scan
 func TestInt128Sci(t *testing.T) { RunSci(t, kI128) }
 
 // TestInt128Hex checks hex output and parsing with big.Int
 func TestInt128Hex(t *testing.T) { RunHex(t, kI128) }
+
+// TestInt128SQL checks Value and Scan with big.Int
+func TestInt128SQL(t *testing.T) { RunSQL(t, kI128) }
+
+// TestNullInt128 checks Scan, Value and JSON of NullInt128
+func TestNullInt128(t *testing.T) {
+	RunNull(t, kI128, func(n NullInt128) (Int128, bool) { return n.Int128, n.Valid }, func(x Int128, ok bool) NullInt128 { return NullInt128{x, ok} })
+}
 
 // TestInt128Ops64 checks the methods with an int64 operand with big.Int
 func TestInt128Ops64(t *testing.T) { RunOps64(t, kI128) }

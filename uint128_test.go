@@ -871,11 +871,19 @@ func TestUint128ModInverse(t *testing.T) { RunModInverse(t, kU128, Uint128.ModIn
 // TestUint128Decimal checks decimal output and parsing with big.Int
 func TestUint128Decimal(t *testing.T) { RunDecimal(t, kU128) }
 
-// TestUint128Sci checks the form m e n of FromDec
+// TestUint128Sci checks the form m e n of FromDec and Scan
 func TestUint128Sci(t *testing.T) { RunSci(t, kU128) }
 
 // TestUint128Hex checks hex output and parsing with big.Int
 func TestUint128Hex(t *testing.T) { RunHex(t, kU128) }
+
+// TestUint128SQL checks Value and Scan with big.Int
+func TestUint128SQL(t *testing.T) { RunSQL(t, kU128) }
+
+// TestNullUint128 checks Scan, Value and JSON of NullUint128
+func TestNullUint128(t *testing.T) {
+	RunNull(t, kU128, func(n NullUint128) (Uint128, bool) { return n.Uint128, n.Valid }, func(x Uint128, ok bool) NullUint128 { return NullUint128{x, ok} })
+}
 
 // TestUint128Ops64 checks the methods with a uint64 operand with big.Int
 func TestUint128Ops64(t *testing.T) { RunOps64(t, kU128) }

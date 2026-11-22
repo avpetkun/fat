@@ -120,6 +120,19 @@ func RunErrorText[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 	if k.Signed {
 		return
 	}
+	// a minus before zero is not a negative value, FromDec rejects 0x first
+	for _, s := range []string{"-0", "-000", "-0x0", "-0X00"} {
+		want := ": cannot parse " + strconv.Quote(s) + ": minus sign"
+		require.Equal(On(t, s), typ+".UnmarshalText"+want, fmt.Sprint(PT(new(T)).UnmarshalText([]byte(s))))
+		require.Equal(On(t, s), typ+".UnmarshalJSON"+want, fmt.Sprint(PT(new(T)).UnmarshalJSON([]byte(`"`+s+`"`))))
+		require.Equal(On(t, s), typ+".Scan"+want, fmt.Sprint(PT(new(T)).Scan(s)))
+		_, err := k.FromHex(s)
+		require.Equal(On(t, s), typ+"FromHex"+want, fmt.Sprint(err))
+		if _, err = k.FromDec(s); hexPrefixed(s) {
+			want = ": cannot parse " + strconv.Quote(s) + ": 0x in decimal text"
+		}
+		require.Equal(On(t, s), typ+"FromDec"+want, fmt.Sprint(err))
+	}
 	require.Equal(t, typ+".UnmarshalJSON: cannot parse -0: minus sign", fmt.Sprint(PT(new(T)).UnmarshalJSON([]byte("-0"))))
 	// any other leading minus is a negative value, whatever follows it
 	for _, s := range []string{"-5", "-0x1f", "-x", "-" + strings.Repeat("9", 100)} {
@@ -128,6 +141,7 @@ func RunErrorText[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 		require.Equal(On(t, s), typ+".UnmarshalJSON"+want, fmt.Sprint(PT(new(T)).UnmarshalJSON([]byte(s))))
 		require.Equal(On(t, s), typ+".UnmarshalJSON"+want, fmt.Sprint(PT(new(T)).UnmarshalJSON([]byte(`"`+s+`"`))))
 	}
+	require.Equal(t, typ+`.Scan: negative value "-5"`, fmt.Sprint(PT(new(T)).Scan("-5")))
 }
 
 // RunPanicText checks that every panic names the func or the method

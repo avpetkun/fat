@@ -1063,11 +1063,19 @@ func TestUint256ModInverse(t *testing.T) { RunModInverse(t, kU256, Uint256.ModIn
 // TestUint256Decimal checks decimal text both ways against big.Int
 func TestUint256Decimal(t *testing.T) { RunDecimal(t, kU256) }
 
-// TestUint256Sci checks the form m e n of FromDec
+// TestUint256Sci checks the form m e n of FromDec and Scan
 func TestUint256Sci(t *testing.T) { RunSci(t, kU256) }
 
 // TestUint256Hex checks hex text both ways against big.Int
 func TestUint256Hex(t *testing.T) { RunHex(t, kU256) }
+
+// TestUint256SQL checks Value and Scan against big.Int
+func TestUint256SQL(t *testing.T) { RunSQL(t, kU256) }
+
+// TestNullUint256 checks NullUint256 with SQL and JSON, null included
+func TestNullUint256(t *testing.T) {
+	RunNull(t, kU256, func(n NullUint256) (Uint256, bool) { return n.Uint256, n.Valid }, func(x Uint256, ok bool) NullUint256 { return NullUint256{x, ok} })
+}
 
 // TestUint256Ops64 checks the methods with a uint64 operand against big.Int
 func TestUint256Ops64(t *testing.T) { RunOps64(t, kU256) }

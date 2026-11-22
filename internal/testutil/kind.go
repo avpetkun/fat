@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"database/sql/driver"
 	"math/big"
 	"testing"
 )
@@ -31,6 +32,7 @@ type Num[T any] interface {
 	PrettyDec(sep byte) string
 	AppendText(b []byte) ([]byte, error)
 	MarshalText() ([]byte, error)
+	Value() (driver.Value, error)
 	Exp(y T) T
 	Expo(y T) (T, bool)
 	Expu(y T) T
@@ -58,6 +60,7 @@ type NumPtr[T any] interface {
 	UnmarshalJSON(text []byte) error
 	UnmarshalBinary(b []byte) error
 	GobDecode(b []byte) error
+	Scan(src any) error
 }
 
 // SignNum is Num with Sign

@@ -916,11 +916,19 @@ func TestInt256GCD(t *testing.T) {
 // TestInt256Decimal checks decimal text both ways against big.Int
 func TestInt256Decimal(t *testing.T) { RunDecimal(t, kI256) }
 
-// TestInt256Sci checks the form m e n of FromDec
+// TestInt256Sci checks the form m e n of FromDec and Scan
 func TestInt256Sci(t *testing.T) { RunSci(t, kI256) }
 
 // TestInt256Hex checks hex text both ways against big.Int
 func TestInt256Hex(t *testing.T) { RunHex(t, kI256) }
+
+// TestInt256SQL checks Value and Scan against big.Int
+func TestInt256SQL(t *testing.T) { RunSQL(t, kI256) }
+
+// TestNullInt256 checks NullInt256 with SQL and JSON, null included
+func TestNullInt256(t *testing.T) {
+	RunNull(t, kI256, func(n NullInt256) (Int256, bool) { return n.Int256, n.Valid }, func(x Int256, ok bool) NullInt256 { return NullInt256{x, ok} })
+}
 
 // TestInt256Ops64 checks the methods with an int64 operand against big.Int
 func TestInt256Ops64(t *testing.T) { RunOps64(t, kI256) }

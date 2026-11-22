@@ -82,7 +82,7 @@ func RunDecimal[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 	}
 }
 
-// RunSci checks m e n in FromDec and MustFromDec against big.Int:
+// RunSci checks m e n in FromDec, MustFromDec and Scan against big.Int:
 // m * 10^n, a zero m for any n, the range and the errors, and that
 // UnmarshalText keeps to plain decimal
 func RunSci[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
@@ -114,17 +114,23 @@ func RunSci[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 					why = "out of range"
 				}
 				x, err := k.FromDec(s)
+				var sx T
+				serr := PT(&sx).Scan(s)
 				if why == "" {
 					require.NoError(t, err)
+					require.NoError(t, serr)
 					require.Equal(t, k.FromBig(want), x)
+					require.Equal(t, x, sx)
 					require.Equal(t, x, k.MustFromDec(s))
 					continue
 				}
 				q := strconv.Quote(s)
 				if why == "negative" {
 					require.Equal(t, "fat."+k.Name+"FromDec: negative value "+q, fmt.Sprint(err))
+					require.Equal(t, "fat."+k.Name+".Scan: negative value "+q, fmt.Sprint(serr))
 				} else {
 					require.Equal(t, "fat."+k.Name+"FromDec: cannot parse "+q+": "+why, fmt.Sprint(err))
+					require.Equal(t, "fat."+k.Name+".Scan: cannot parse "+q+": "+why, fmt.Sprint(serr))
 				}
 				require.True(t, x.IsZero())
 				must := strings.Replace(fmt.Sprint(err), "fat."+k.Name, "fat.Must"+k.Name, 1)
@@ -132,7 +138,7 @@ func RunSci[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 			}
 		}
 	}
-	// the errors of a bad form
+	// the errors of a bad form, in FromDec and Scan alike
 	for _, c := range []struct{ s, why string }{
 		{"1e", "no digits after the exponent"},
 		{"1E+", "no digits after the exponent"},
@@ -148,9 +154,22 @@ func RunSci[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 		q := strconv.Quote(c.s)
 		_, err := k.FromDec(c.s)
 		require.Equal(t, "fat."+k.Name+"FromDec: cannot parse "+q+": "+c.why, fmt.Sprint(err))
+		var x T
+		require.Equal(t, "fat."+k.Name+".Scan: cannot parse "+q+": "+c.why, fmt.Sprint(PT(&x).Scan(c.s)))
 	}
+	// 0x picks hex in Scan, where e is a digit; FromDec turns 0x down
+	var x T
+	require.NoError(t, PT(&x).Scan("0x1e5"))
+	require.Equal(t, k.Small(0x1e5), x)
 	_, err := k.FromDec("0x1e5")
 	require.Equal(t, "fat."+k.Name+"FromDec: cannot parse \"0x1e5\": 0x in decimal text", fmt.Sprint(err))
+	// -0x0e5 in Scan is negative hex, not a minus before a zero mantissa
+	if !k.Signed {
+		require.Equal(t, "fat."+k.Name+".Scan: negative value \"-0x0e5\"", fmt.Sprint(PT(&x).Scan("-0x0e5")))
+	}
+	// UnmarshalText and JSON keep to plain decimal
+	require.Error(t, PT(&x).UnmarshalText([]byte("1e3")))
+	require.Error(t, PT(&x).UnmarshalJSON([]byte(`"1e3"`)))
 }
 
 // RunHex checks Hex and AppendHex with big.Int at every digit count.

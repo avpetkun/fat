@@ -1,6 +1,8 @@
 package fat
 
 import (
+	"database/sql"
+	"database/sql/driver"
 	"encoding"
 	"encoding/binary"
 	"encoding/gob"
@@ -430,6 +432,52 @@ func (x *Uint256) GobDecode(b []byte) error {
 		binary.BigEndian.Uint64(b[8:]),
 		binary.BigEndian.Uint64(b),
 	}
+	return nil
+}
+
+var (
+	_ sql.Scanner   = (*Uint256)(nil)
+	_ driver.Valuer = Uint256{}
+)
+
+// Value is decimal x as a string, for NUMERIC, DECIMAL and text columns
+func (x Uint256) Value() (driver.Value, error) {
+	return x.Dec(), nil
+}
+
+// Scan reads an integer, or text as UnmarshalText does and m e n as FromDec.
+// NULL is an error, and x stays as is on an error
+func (x *Uint256) Scan(src any) error {
+	switch v := src.(type) {
+	case int64:
+		if v < 0 {
+			return ErrNegative{"Uint256.Scan", formatInt64(v)}
+		}
+		*x = Uint256{uint64(v), 0, 0, 0}
+		return nil
+	case uint64:
+		*x = Uint256{v, 0, 0, 0}
+		return nil
+	case []byte:
+		return x.scanText(v)
+	case string:
+		// the bytes don't escape, so the conversion copies nothing
+		return x.scanText([]byte(v))
+	}
+	return newScanError("Uint256.Scan", src)
+}
+
+// scanText is UnmarshalText with the errors of Scan
+func (x *Uint256) scanText(b []byte) error {
+	// not UnmarshalText itself: its error would be built and dropped
+	y, ok := parseUint256(b, 0)
+	if !ok {
+		var err error
+		if y, err = uint256FromDecSlow("Uint256.Scan", b); err != nil {
+			return err
+		}
+	}
+	*x = y
 	return nil
 }
 
