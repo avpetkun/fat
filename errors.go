@@ -10,6 +10,7 @@ var (
 	_ error = ErrParse{}
 	_ error = ErrNegative{}
 	_ error = ErrRange("")
+	_ error = ErrBinary{}
 )
 
 // ErrParse is text a func or method cannot parse, Error tells why
@@ -52,6 +53,20 @@ type ErrRange string
 // Error names the func
 func (e ErrRange) Error() string {
 	return "fat." + string(e) + ": out of range"
+}
+
+// ErrBinary is a byte length a method cannot take
+type ErrBinary struct {
+	fn      string
+	n, want int
+}
+
+// Error names the method, the length given and the one it takes
+func (e ErrBinary) Error() string {
+	var buf [64]byte
+	b := append(append(append(buf[:0], "fat."...), e.fn...), ": cannot parse "...)
+	b = append(appendDecimal64(b, uint64(e.n)), " bytes, want "...)
+	return string(appendDecimal64(b, uint64(e.want)))
 }
 
 // appendErrReason appends why s fails the parser of fn.

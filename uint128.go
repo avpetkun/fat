@@ -1,6 +1,9 @@
 package fat
 
 import (
+	"encoding"
+	"encoding/binary"
+	"encoding/gob"
 	"math"
 	"math/big"
 	"math/bits"
@@ -265,6 +268,56 @@ func uint128FromWords(words []big.Word) (x Uint128, left int) {
 		l0 = l0<<(bits.UintSize/2)<<(bits.UintSize/2) | uint64(words[i])
 	}
 	return Uint128{l0, l1}, len(words) - n
+}
+
+// --- interfaces -----------------------------------------
+
+var (
+	_ encoding.BinaryMarshaler   = (*Uint128)(nil)
+	_ encoding.BinaryAppender    = (*Uint128)(nil)
+	_ encoding.BinaryUnmarshaler = (*Uint128)(nil)
+)
+
+// MarshalBinary writes 16 bytes big-endian
+func (x Uint128) MarshalBinary() ([]byte, error) {
+	b := make([]byte, 16)
+	binary.BigEndian.PutUint64(b, x.L1)
+	binary.BigEndian.PutUint64(b[8:], x.L0)
+	return b, nil
+}
+
+// AppendBinary appends the 16 bytes of MarshalBinary to b
+func (x Uint128) AppendBinary(b []byte) ([]byte, error) {
+	b = binary.BigEndian.AppendUint64(b, x.L1)
+	return binary.BigEndian.AppendUint64(b, x.L0), nil
+}
+
+// UnmarshalBinary reads 16 bytes big-endian, ErrBinary for any other length
+func (x *Uint128) UnmarshalBinary(b []byte) error {
+	if len(b) != 16 {
+		return ErrBinary{"Uint128.UnmarshalBinary", len(b), 16}
+	}
+	*x = Uint128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}
+	return nil
+}
+
+var (
+	_ gob.GobEncoder = (*Uint128)(nil)
+	_ gob.GobDecoder = (*Uint128)(nil)
+)
+
+// GobEncode is MarshalBinary
+func (x Uint128) GobEncode() ([]byte, error) {
+	return x.MarshalBinary()
+}
+
+// GobDecode is UnmarshalBinary
+func (x *Uint128) GobDecode(b []byte) error {
+	if len(b) != 16 {
+		return ErrBinary{"Uint128.GobDecode", len(b), 16}
+	}
+	*x = Uint128{binary.BigEndian.Uint64(b[8:]), binary.BigEndian.Uint64(b)}
+	return nil
 }
 
 // --- comparison -----------------------------------------

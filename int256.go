@@ -1,6 +1,9 @@
 package fat
 
 import (
+	"encoding"
+	"encoding/binary"
+	"encoding/gob"
 	"math"
 	"math/big"
 	"math/bits"
@@ -319,6 +322,77 @@ func (x Int256) PutBig(b *big.Int) *big.Int {
 		b.Neg(b)
 	}
 	return b
+}
+
+// --- interfaces -----------------------------------------
+
+var (
+	_ encoding.BinaryMarshaler   = (*Int256)(nil)
+	_ encoding.BinaryAppender    = (*Int256)(nil)
+	_ encoding.BinaryUnmarshaler = (*Int256)(nil)
+)
+
+// MarshalBinary writes 32 bytes big-endian in two's complement
+func (x Int256) MarshalBinary() ([]byte, error) {
+	b := make([]byte, 32)
+	binary.BigEndian.PutUint64(b, x.L3)
+	binary.BigEndian.PutUint64(b[8:], x.L2)
+	binary.BigEndian.PutUint64(b[16:], x.L1)
+	binary.BigEndian.PutUint64(b[24:], x.L0)
+	return b, nil
+}
+
+// AppendBinary appends the 32 bytes of MarshalBinary to b
+func (x Int256) AppendBinary(b []byte) ([]byte, error) {
+	start := len(b)
+	if cap(b)-start < 32 {
+		b = append(b, make([]byte, 32)...)
+	}
+	d := b[start : start+32]
+	binary.BigEndian.PutUint64(d, x.L3)
+	binary.BigEndian.PutUint64(d[8:], x.L2)
+	binary.BigEndian.PutUint64(d[16:], x.L1)
+	binary.BigEndian.PutUint64(d[24:], x.L0)
+	return b[:start+32], nil
+}
+
+// UnmarshalBinary reads 32 bytes big-endian in two's complement.
+// It returns ErrBinary for any other length
+func (x *Int256) UnmarshalBinary(b []byte) error {
+	if len(b) != 32 {
+		return ErrBinary{"Int256.UnmarshalBinary", len(b), 32}
+	}
+	*x = Int256{
+		binary.BigEndian.Uint64(b[24:]),
+		binary.BigEndian.Uint64(b[16:]),
+		binary.BigEndian.Uint64(b[8:]),
+		binary.BigEndian.Uint64(b),
+	}
+	return nil
+}
+
+var (
+	_ gob.GobEncoder = (*Int256)(nil)
+	_ gob.GobDecoder = (*Int256)(nil)
+)
+
+// GobEncode is MarshalBinary
+func (x Int256) GobEncode() ([]byte, error) {
+	return x.MarshalBinary()
+}
+
+// GobDecode is UnmarshalBinary
+func (x *Int256) GobDecode(b []byte) error {
+	if len(b) != 32 {
+		return ErrBinary{"Int256.GobDecode", len(b), 32}
+	}
+	*x = Int256{
+		binary.BigEndian.Uint64(b[24:]),
+		binary.BigEndian.Uint64(b[16:]),
+		binary.BigEndian.Uint64(b[8:]),
+		binary.BigEndian.Uint64(b),
+	}
+	return nil
 }
 
 // --- sign -----------------------------------------------

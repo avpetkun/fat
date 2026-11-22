@@ -1,6 +1,8 @@
 package fat
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"math"
 	"math/big"
@@ -70,12 +72,37 @@ func TestInt256Convert(t *testing.T) {
 // TestInt256Encoding checks the binary, gob and JSON forms and round trips
 func TestInt256Encoding(t *testing.T) {
 	t.Parallel()
+	Values256(func(x Int256) {
+		t := On(t, RefI256(x))
+
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, RefBE(RefI256(x), 32), b)
+		ab, err := x.AppendBinary([]byte("ab"))
+		require.NoError(t, err)
+		require.Equal(t, append([]byte("ab"), b...), ab)
+
+		y := Int256{7, 7, 7, 7}
+		require.NoError(t, y.UnmarshalBinary(b))
+		require.Equal(t, x, y)
+	})
+
+	require.Equal(t, Be(32, 0), BinaryOf(Int256{}))
+	require.Equal(t, Be(32, 0, 0x7f), BinaryOf(NewInt256(127)))
+	require.Equal(t, Be(32, 0xff, 0x80), BinaryOf(NewInt256(-128)))
+	require.Equal(t, Be(32, 0xff), BinaryOf(NewInt256(-1)))
+	require.Equal(t, 32, len(BinaryOf(MaxInt256())))
 	RunBinaryLengths(t, kI256)
 
 	// gob and json pick up the interfaces
 	type doc struct{ A, B Int256 }
 	in := doc{MinInt256(), MaxInt256()}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(in))
 	var out doc
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&out))
+	require.Equal(t, in, out)
 
 	js, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -561,6 +588,55 @@ func BenchmarkInt256Convert(b *testing.B) {
 			sinkI256, SinkBool = Int256FromFloat64(x[i&BenchMask])
 		}
 	})
+	b.Run("op=AppendBinary", func(b *testing.B) {
+		x := in.i256
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=MarshalBinary", func(b *testing.B) {
+		x := in.i256
+		var buf []byte
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].MarshalBinary()
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=UnmarshalBinary", func(b *testing.B) {
+		x := make([][]byte, len(in.i256))
+		for i, v := range in.i256 {
+			x[i], _ = v.MarshalBinary()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			_ = sinkI256.UnmarshalBinary(x[i&BenchMask])
+		}
+	})
+}
+
+// BenchmarkInt256Binary measures AppendBinary and UnmarshalBinary
+func BenchmarkInt256Binary(b *testing.B) {
+	in := benchI256()
+	b.Run("op=Append", func(b *testing.B) {
+		x := in.i256
+		buf := make([]byte, 0, 64)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=Unmarshal", func(b *testing.B) {
+		x := make([][]byte, len(in.i256))
+		for i, v := range in.i256 {
+			x[i], _ = v.MarshalBinary()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			_ = sinkI256.UnmarshalBinary(x[i&BenchMask])
+		}
+	})
 }
 
 // kI256 describes Int256 for the shared tests
@@ -919,6 +995,15 @@ func TestInt256From128(t *testing.T) {
 		xb := RefI128(x)
 		t := On(t, xb)
 		require.Big(t, xb, RefI256(x.Int256()))
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		w, err := x.Int256().MarshalBinary()
+		require.NoError(t, err)
+		ext := byte(0)
+		if x.IsNegative() {
+			ext = 0xff
+		}
+		require.Equal(t, append(Be(16, ext), b...), w)
 	})
 }
 

@@ -1,6 +1,8 @@
 package fat
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"math"
 	"math/big"
@@ -66,12 +68,42 @@ func TestUint128Convert(t *testing.T) {
 // TestUint128Encoding checks the 16-byte binary form, gob and JSON
 func TestUint128Encoding(t *testing.T) {
 	t.Parallel()
+	Values128(func(x Uint128) {
+		t := On(t, RefU128(x))
+
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, RefBE(RefU128(x), 16), b)
+		ab, err := x.AppendBinary([]byte("ab"))
+		require.NoError(t, err)
+		require.Equal(t, append([]byte("ab"), b...), ab)
+
+		y := Uint128{7, 7}
+		require.NoError(t, y.UnmarshalBinary(b))
+		require.Equal(t, x, y)
+	})
+
+	require.Equal(t, Be(16, 0), BinaryOf(Uint128{}))
+	require.Equal(t, Be(16, 0, 0x01, 0x2c), BinaryOf(NewUint128(300)))
+	require.Equal(t, Be(16, 0, 8, 7, 6, 5, 4, 3, 2, 1), BinaryOf(NewUint128(0x0807060504030201)))
+	require.Equal(t, Be(16, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1), BinaryOf(Uint128{1, 1}))
+	require.Equal(t, 16, len(BinaryOf(MaxUint128())))
 	RunBinaryLengths(t, kU128)
+	// a failed decode leaves the value as it was
+	y := Uint128{7, 7}
+	require.Equal(t, "fat.Uint128.UnmarshalBinary: cannot parse 17 bytes, want 16", y.UnmarshalBinary(make([]byte, 17)).Error())
+	require.Equal(t, "fat.Uint128.GobDecode: cannot parse 0 bytes, want 16", y.GobDecode(nil).Error())
+	require.Equal(t, Uint128{7, 7}, y)
 
 	// gob and json pick up the interfaces
 	type doc struct{ A, B Uint128 }
 	in := doc{MaxUint128(), Uint128{1, 2}}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(in))
 	var out doc
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&out))
+	require.Equal(t, in, out)
 
 	js, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -705,6 +737,23 @@ func BenchmarkUint128Convert(b *testing.B) {
 			bigs[i].Neg(bigs[i])
 		}
 	}
+	bins := make([][]byte, len(in.u128))
+	for i, x := range in.u128 {
+		bins[i], _ = x.MarshalBinary()
+	}
+	b.Run("op=AppendBinary", func(b *testing.B) {
+		x := in.u128
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=UnmarshalBinary", func(b *testing.B) {
+		for i := range b.N {
+			_ = sinkU128.UnmarshalBinary(bins[i&BenchMask])
+		}
+	})
 	b.Run("op=PutBig", func(b *testing.B) {
 		x := in.u128
 		z := new(big.Int)

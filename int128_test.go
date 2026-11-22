@@ -1,6 +1,8 @@
 package fat
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"math"
 	"math/big"
@@ -67,12 +69,37 @@ func TestInt128Convert(t *testing.T) {
 // TestInt128Encoding checks the 16-byte binary form, gob and JSON
 func TestInt128Encoding(t *testing.T) {
 	t.Parallel()
+	Values128(func(x Int128) {
+		t := On(t, RefI128(x))
+
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, RefBE(RefI128(x), 16), b)
+		ab, err := x.AppendBinary([]byte("ab"))
+		require.NoError(t, err)
+		require.Equal(t, append([]byte("ab"), b...), ab)
+
+		y := Int128{7, 7}
+		require.NoError(t, y.UnmarshalBinary(b))
+		require.Equal(t, x, y)
+	})
+
+	require.Equal(t, Be(16, 0), BinaryOf(Int128{}))
+	require.Equal(t, Be(16, 0xff), BinaryOf(NewInt128(-1)))
+	require.Equal(t, Be(16, 0xff, 0xff, 0x7f), BinaryOf(NewInt128(-129)))
+	require.Equal(t, Be(16, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0), BinaryOf(NewInt128(int64(math.MinInt64))))
+	require.Equal(t, 16, len(BinaryOf(MinInt128())))
 	RunBinaryLengths(t, kI128)
 
 	// gob and json pick up the interfaces
 	type doc struct{ A, B Int128 }
 	in := doc{MinInt128(), MaxInt128()}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(in))
 	var out doc
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&out))
+	require.Equal(t, in, out)
 
 	js, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -398,6 +425,24 @@ func BenchmarkInt128(b *testing.B) {
 			SinkInt = x[i&BenchMask].CmpBig(y[i&BenchMask])
 		}
 	})
+	b.Run("op=AppendBinary", func(b *testing.B) {
+		x := in.i128
+		buf := make([]byte, 0, 16)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=UnmarshalBinary", func(b *testing.B) {
+		x := make([][]byte, len(in.i128))
+		for i, v := range in.i128 {
+			x[i], _ = v.MarshalBinary()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			_ = sinkI128.UnmarshalBinary(x[i&BenchMask])
+		}
+	})
 }
 
 // benchBigs128 converts x to big.Int values
@@ -424,6 +469,28 @@ func BenchmarkInt128Decimal(b *testing.B) {
 		x := in.i128s
 		for i := range b.N {
 			sinkI128, _ = Int128FromDec(x[i&BenchMask])
+		}
+	})
+}
+
+// BenchmarkInt128Convert measures AppendBinary and UnmarshalBinary
+func BenchmarkInt128Convert(b *testing.B) {
+	in := benchI128()
+	bins := make([][]byte, len(in.i128))
+	for i, x := range in.i128 {
+		bins[i], _ = x.MarshalBinary()
+	}
+	b.Run("op=AppendBinary", func(b *testing.B) {
+		x := in.i128
+		buf := make([]byte, 0, 32)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=UnmarshalBinary", func(b *testing.B) {
+		for i := range b.N {
+			_ = sinkI128.UnmarshalBinary(bins[i&BenchMask])
 		}
 	})
 }

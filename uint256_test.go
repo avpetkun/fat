@@ -1,6 +1,8 @@
 package fat
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"math"
 	"math/big"
@@ -120,12 +122,35 @@ func TestUint256ParseLengths(t *testing.T) {
 // TestUint256Encoding checks the binary, gob and JSON forms and round trips
 func TestUint256Encoding(t *testing.T) {
 	t.Parallel()
+	Values256(func(x Uint256) {
+		t := On(t, RefU256(x))
+
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, RefBE(RefU256(x), 32), b)
+		ab, err := x.AppendBinary([]byte("ab"))
+		require.NoError(t, err)
+		require.Equal(t, append([]byte("ab"), b...), ab)
+
+		y := Uint256{7, 7, 7, 7}
+		require.NoError(t, y.UnmarshalBinary(b))
+		require.Equal(t, x, y)
+	})
+
+	require.Equal(t, Be(32, 0), BinaryOf(Uint256{}))
+	require.Equal(t, Be(32, 0, 0xff), BinaryOf(NewUint256(255)))
+	require.Equal(t, 32, len(BinaryOf(MaxUint256())))
 	RunBinaryLengths(t, kU256)
 
 	// gob and json pick up the interfaces
 	type doc struct{ A, B Uint256 }
 	in := doc{MaxUint256(), Uint256{1, 2, 3, 4}}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(in))
 	var out doc
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&out))
+	require.Equal(t, in, out)
 
 	js, err := json.Marshal(in)
 	require.NoError(t, err)
@@ -924,6 +949,29 @@ func BenchmarkUint256Decimal(b *testing.B) {
 	})
 }
 
+// BenchmarkUint256Binary measures AppendBinary and UnmarshalBinary
+func BenchmarkUint256Binary(b *testing.B) {
+	in := benchU256()
+	b.Run("op=Append", func(b *testing.B) {
+		x := in.u256
+		buf := make([]byte, 0, 64)
+		for i := range b.N {
+			buf, _ = x[i&BenchMask].AppendBinary(buf[:0])
+		}
+		SinkBytes = buf
+	})
+	b.Run("op=Unmarshal", func(b *testing.B) {
+		x := make([][]byte, len(in.u256))
+		for i, v := range in.u256 {
+			x[i], _ = v.MarshalBinary()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			_ = sinkU256.UnmarshalBinary(x[i&BenchMask])
+		}
+	})
+}
+
 // BenchmarkUint256Big measures the big.Int and float64 conversions both ways
 func BenchmarkUint256Big(b *testing.B) {
 	in := benchU256()
@@ -1078,6 +1126,11 @@ func TestUint256From128(t *testing.T) {
 	Values128(func(x Uint128) {
 		t := On(t, RefU128(x))
 		require.Equal(t, Uint256{x.L0, x.L1, 0, 0}, x.Uint256())
+		b, err := x.MarshalBinary()
+		require.NoError(t, err)
+		w, err := x.Uint256().MarshalBinary()
+		require.NoError(t, err)
+		require.Equal(t, append(Be(16, 0), b...), w)
 	})
 }
 

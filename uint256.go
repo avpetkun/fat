@@ -1,6 +1,9 @@
 package fat
 
 import (
+	"encoding"
+	"encoding/binary"
+	"encoding/gob"
 	"math"
 	"math/big"
 	"math/bits"
@@ -329,6 +332,79 @@ func uint256FromWords(words []big.Word) (x Uint256, left int) {
 		x.L3, x.L2, x.L1, x.L0 = x.L3<<h<<h|x.L2>>(64-bits.UintSize), x.L2<<h<<h|x.L1>>(64-bits.UintSize), x.L1<<h<<h|x.L0>>(64-bits.UintSize), x.L0<<h<<h|uint64(words[i])
 	}
 	return x, len(words) - n
+}
+
+// big.Int conversions: a fast path for 64-bit words and a portable one
+// for the rest, which 64-bit words can reach too
+
+// --- interfaces -----------------------------------------
+
+var (
+	_ encoding.BinaryMarshaler   = (*Uint256)(nil)
+	_ encoding.BinaryAppender    = (*Uint256)(nil)
+	_ encoding.BinaryUnmarshaler = (*Uint256)(nil)
+)
+
+// MarshalBinary writes 32 bytes big-endian
+func (x Uint256) MarshalBinary() ([]byte, error) {
+	b := make([]byte, 32)
+	binary.BigEndian.PutUint64(b, x.L3)
+	binary.BigEndian.PutUint64(b[8:], x.L2)
+	binary.BigEndian.PutUint64(b[16:], x.L1)
+	binary.BigEndian.PutUint64(b[24:], x.L0)
+	return b, nil
+}
+
+// AppendBinary appends the 32 bytes of MarshalBinary to b
+func (x Uint256) AppendBinary(b []byte) ([]byte, error) {
+	start := len(b)
+	if cap(b)-start < 32 {
+		b = append(b, make([]byte, 32)...)
+	}
+	d := b[start : start+32]
+	binary.BigEndian.PutUint64(d, x.L3)
+	binary.BigEndian.PutUint64(d[8:], x.L2)
+	binary.BigEndian.PutUint64(d[16:], x.L1)
+	binary.BigEndian.PutUint64(d[24:], x.L0)
+	return b[:start+32], nil
+}
+
+// UnmarshalBinary reads 32 bytes big-endian, ErrBinary for any other length
+func (x *Uint256) UnmarshalBinary(b []byte) error {
+	if len(b) != 32 {
+		return ErrBinary{"Uint256.UnmarshalBinary", len(b), 32}
+	}
+	*x = Uint256{
+		binary.BigEndian.Uint64(b[24:]),
+		binary.BigEndian.Uint64(b[16:]),
+		binary.BigEndian.Uint64(b[8:]),
+		binary.BigEndian.Uint64(b),
+	}
+	return nil
+}
+
+var (
+	_ gob.GobEncoder = (*Uint256)(nil)
+	_ gob.GobDecoder = (*Uint256)(nil)
+)
+
+// GobEncode is MarshalBinary
+func (x Uint256) GobEncode() ([]byte, error) {
+	return x.MarshalBinary()
+}
+
+// GobDecode is UnmarshalBinary
+func (x *Uint256) GobDecode(b []byte) error {
+	if len(b) != 32 {
+		return ErrBinary{"Uint256.GobDecode", len(b), 32}
+	}
+	*x = Uint256{
+		binary.BigEndian.Uint64(b[24:]),
+		binary.BigEndian.Uint64(b[16:]),
+		binary.BigEndian.Uint64(b[8:]),
+		binary.BigEndian.Uint64(b),
+	}
+	return nil
 }
 
 // --- comparison -----------------------------------------

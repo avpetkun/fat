@@ -47,6 +47,8 @@ type NumPtr[T any] interface {
 	*T
 	UnmarshalText(text []byte) error
 	UnmarshalJSON(text []byte) error
+	UnmarshalBinary(b []byte) error
+	GobDecode(b []byte) error
 }
 
 // SignNum is Num with Sign

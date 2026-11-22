@@ -40,6 +40,11 @@ func RunErrorText[T Num[T], PT NumPtr[T]](t *testing.T, k Kind[T]) {
 		require.Equal(On(t, c.s), typ+`.UnmarshalJSON: cannot parse `+c.s+`: `+why, fmt.Sprint(js))
 		require.Equal(On(t, c.s), typ+`.UnmarshalJSON: cannot parse "`+c.s+`": `+c.why, fmt.Sprint(quoted))
 	}
+	for _, n := range []int{0, k.Bits/8 - 1, k.Bits/8 + 1} {
+		want := fmt.Sprintf(": cannot parse %d bytes, want %d", n, k.Bits/8)
+		require.Equal(On(t, n), typ+".UnmarshalBinary"+want, fmt.Sprint(PT(new(T)).UnmarshalBinary(make([]byte, n))))
+		require.Equal(On(t, n), typ+".GobDecode"+want, fmt.Sprint(PT(new(T)).GobDecode(make([]byte, n))))
+	}
 	// the least hex past the width: 2^bits, or 2^(bits-1) for a signed type
 	over := "0x1" + strings.Repeat("0", k.Bits/4)
 	if k.Signed {
