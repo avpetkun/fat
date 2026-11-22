@@ -1092,6 +1092,63 @@ func (x Uint256) expMod(y, m Uint256) (Uint256, bool) {
 	return expModOdd(b, y, m), false
 }
 
+// GCD returns the greatest common divisor of x and y, x for y == 0
+func (x Uint256) GCD(y Uint256) Uint256 {
+	if x.IsZero() {
+		return y
+	}
+	if y.IsZero() {
+		return x
+	}
+	// one division takes the difference in length at once,
+	// where a binary step removes a bit or two
+	if x.LessThan(y) {
+		x, y = y, x
+	}
+	_, x, _ = x.divMod(y)
+	if x.IsZero() {
+		return y
+	}
+	// the common power of two, then both odd
+	tx, ty := x.TrailingZeros(), y.TrailingZeros()
+	return gcdOdd256(x.Rsh(tx), y.Rsh(ty)).Lsh(min(tx, ty))
+}
+
+// ModInverse returns y with x * y % m == 1 and true, or 0 and false where x
+// and m share a factor and none exists; for m == 1 it is 0 and true.
+// It panics for m == 0
+func (x Uint256) ModInverse(m Uint256) (Uint256, bool) {
+	if m.IsZero() {
+		panic("fat.Uint256.ModInverse: division by zero")
+	}
+	if !x.LessThan(m) {
+		_, x, _ = x.divMod(m)
+	}
+	if m.L2|m.L3 == 0 {
+		r, ok := Uint128{x.L0, x.L1}.ModInverse(Uint128{m.L0, m.L1})
+		return Uint256{r.L0, r.L1, 0, 0}, ok
+	}
+	if m.L0&1 != 0 {
+		return invOdd256(x, m)
+	}
+	// an even m takes an odd x, and 1 is its own inverse
+	if x.L0&1 == 0 {
+		return Uint256{}, false
+	}
+	if x == (Uint256{L0: 1}) {
+		return x, true
+	}
+	// with m*t = 1 (mod x) from the odd modulus x, m*t = 1 + x*s
+	// and x*(m - s) = 1 (mod m), where s = m*t / x < m
+	_, mx, _ := m.divMod(x)
+	t, ok := invOdd256(mx, x)
+	if !ok {
+		return Uint256{}, false
+	}
+	s, _, _ := m.mulDivMod(t, x)
+	return m.Subu(s), true
+}
+
 // expModEven is expMod for an even m, y > 0 and b < m by the Chinese
 // remainder theorem on m = 2^k * q with q odd: b^y % q by expModOdd and
 // b^y % 2^k as the low bits of Expu, joined by Garner's formula
@@ -1974,4 +2031,198 @@ func divFloatNear(x, y Uint256, q, c, d, e, neg uint64) (float64, bool) {
 	// the shifted side below the other is x below when it is x
 	b ^= d >> 63
 	return float64(c+1-2*b) * math.Float64frombits(e<<52|neg), false
+}
+
+// gcdOdd256 is gcdOdd128 on four limbs while one value is past 128 bits.
+// For an odd b and a nonzero a only
+func gcdOdd256(a, b Uint256) Uint256 {
+	for a.L2|a.L3|b.L2|b.L3 != 0 {
+		f0, g0, f1, g1 := gcdSteps31(approx256(a, b))
+		a, b = linAbs256(a, b, f0, g0), linAbs256(a, b, f1, g1)
+		if a.IsZero() {
+			return b
+		}
+	}
+	// a stays nonzero: the loop returns on a zero one
+	x := Uint128{a.L0, a.L1}
+	r := gcdOdd128(x.Rsh(x.TrailingZeros()), Uint128{b.L0, b.L1})
+	return Uint256{r.L0, r.L1, 0, 0}
+}
+
+// invOdd256 returns 1/x mod m and true, or false where x and m share a factor,
+// as invOdd128 on four limbs: a and b go on in two limbs, then in one, once
+// they fit. For an odd m and x < m only
+func invOdd256(x, m Uint256) (Uint256, bool) {
+	if m.L2|m.L3 == 0 {
+		r, ok := invOdd128(Uint128{x.L0, x.L1}, Uint128{m.L0, m.L1})
+		return Uint256{r.L0, r.L1, 0, 0}, ok
+	}
+	mp := montInv(m.L0)
+	a, b, u, v := x, m, Uint256{L0: 1}, Uint256{}
+	var p0, q0, p1, q1 int64
+	odd := false
+	for a.L2|a.L3|b.L2|b.L3 != 0 {
+		// a zero a leaves b, the GCD, past 128 bits
+		if a.IsZero() {
+			return Uint256{}, false
+		}
+		f0, g0, f1, g1 := gcdSteps31(approx256(a, b))
+		na, sa := linOne256(a, b, f0, g0)
+		nb, sb := linOne256(a, b, f1, g1)
+		a, b = na, nb
+		f0, g0, f1, g1 = foldSigns(f0, g0, f1, g1, sa, sb)
+		if odd {
+			f0, g0, f1, g1 = matMul(f0, g0, f1, g1, p0, q0, p1, q1)
+			u, v = modLin256(u, v, f0, g0, 62, m, mp), modLin256(u, v, f1, g1, 62, m, mp)
+		}
+		p0, q0, p1, q1 = f0, g0, f1, g1
+		odd = !odd
+	}
+	e, h := Uint128{a.L0, a.L1}, Uint128{b.L0, b.L1}
+	for e.L1|h.L1 != 0 {
+		if e.L0|e.L1 == 0 {
+			return Uint256{}, false
+		}
+		f0, g0, f1, g1 := gcdSteps31(approx128(e, h))
+		ne, se := linOne128(e, h, f0, g0)
+		nh, sh := linOne128(e, h, f1, g1)
+		e, h = ne, nh
+		f0, g0, f1, g1 = foldSigns(f0, g0, f1, g1, se, sh)
+		if odd {
+			f0, g0, f1, g1 = matMul(f0, g0, f1, g1, p0, q0, p1, q1)
+			u, v = modLin256(u, v, f0, g0, 62, m, mp), modLin256(u, v, f1, g1, 62, m, mp)
+		}
+		p0, q0, p1, q1 = f0, g0, f1, g1
+		odd = !odd
+	}
+	c, d := e.L0, h.L0
+	for c != 0 {
+		f0, g0, f1, g1 := gcdSteps31(c, d)
+		nc, sc := linOne64(c, d, f0, g0)
+		nd, sd := linOne64(c, d, f1, g1)
+		c, d = nc, nd
+		f0, g0, f1, g1 = foldSigns(f0, g0, f1, g1, sc, sd)
+		if odd {
+			f0, g0, f1, g1 = matMul(f0, g0, f1, g1, p0, q0, p1, q1)
+			u, v = modLin256(u, v, f0, g0, 62, m, mp), modLin256(u, v, f1, g1, 62, m, mp)
+		}
+		p0, q0, p1, q1 = f0, g0, f1, g1
+		odd = !odd
+	}
+	if d != 1 {
+		return Uint256{}, false
+	}
+	if odd {
+		v = modLin256(u, v, p1, q1, 31, m, mp)
+	}
+	return v, true
+}
+
+// approx256 is approx128 on four limbs, the window from bit 31..223
+func approx256(a, b Uint256) (uint64, uint64) {
+	s := uint(max(223-a.Or(b).LeadingZeros(), 31))
+	r, q := s&63, s>>6
+	// the limb at s and the one above it by conditional moves on q
+	a0, a1, b0, b1 := a.L0, a.L1, b.L0, b.L1
+	if q&1 != 0 {
+		a0, a1, b0, b1 = a.L1, a.L2, b.L1, b.L2
+	}
+	a2, a3, b2, b3 := a.L2, a.L3, b.L2, b.L3
+	if q&1 != 0 {
+		a2, a3, b2, b3 = a.L3, 0, b.L3, 0
+	}
+	if q&2 != 0 {
+		a0, a1, b0, b1 = a2, a3, b2, b3
+	}
+	// <<1<<(^r&63) is <<(64-r), 0 at r = 0
+	wa := a0>>r | a1<<1<<(^r&63)
+	wb := b0>>r | b1<<1<<(^r&63)
+	return wa<<31 | a.L0&(1<<31-1), wb<<31 | b.L0&(1<<31-1)
+}
+
+// mulS256 returns a * f as five limbs of two's complement
+func mulS256(a Uint256, f int64) (p0, p1, p2, p3, p4 uint64) {
+	h0, p0 := bits.Mul64(a.L0, uint64(f))
+	h1, l1 := bits.Mul64(a.L1, uint64(f))
+	h2, l2 := bits.Mul64(a.L2, uint64(f))
+	h3, l3 := bits.Mul64(a.L3, uint64(f))
+	p1, c := bits.Add64(h0, l1, 0)
+	p2, c = bits.Add64(h1, l2, c)
+	p3, c = bits.Add64(h2, l3, c)
+	p4 = h3 + c
+	// a negative f is uint64(f) - 2^64
+	mf := uint64(f >> 63)
+	p1, c = bits.Sub64(p1, a.L0&mf, 0)
+	p2, c = bits.Sub64(p2, a.L1&mf, c)
+	p3, c = bits.Sub64(p3, a.L2&mf, c)
+	p4 -= a.L3&mf + c
+	return
+}
+
+// linAbs256 is linOne256 without the sign, for the GCD
+func linAbs256(a, b Uint256, f, g int64) Uint256 {
+	r, _ := linOne256(a, b, f, g)
+	return r
+}
+
+// linOne256 returns |a*f + b*g| / 2^31 and ^0 for a negative sum. For a sum
+// that is a multiple of 2^31 and |f| + |g| <= 2^31 only
+func linOne256(a, b Uint256, f, g int64) (Uint256, uint64) {
+	p0, p1, p2, p3, p4 := mulS256(a, f)
+	q0, q1, q2, q3, q4 := mulS256(b, g)
+	p0, c := bits.Add64(p0, q0, 0)
+	p1, c = bits.Add64(p1, q1, c)
+	p2, c = bits.Add64(p2, q2, c)
+	p3, c = bits.Add64(p3, q3, c)
+	p4 += q4 + c
+	// below 2^287 in size: the shifted value and its sign fit 257 bits
+	n := uint64(int64(p4) >> 63)
+	r0, r1, r2, r3 := p0>>31|p1<<33, p1>>31|p2<<33, p2>>31|p3<<33, p3>>31|p4<<33
+	r0, c = bits.Sub64(r0^n, n, 0)
+	r1, c = bits.Sub64(r1^n, n, c)
+	r2, c = bits.Sub64(r2^n, n, c)
+	r3, _ = bits.Sub64(r3^n, n, c)
+	return Uint256{r0, r1, r2, r3}, n
+}
+
+// modLin256 is modLin128 on four limbs
+func modLin256(u, v Uint256, f, g int64, s uint, m Uint256, mp uint64) Uint256 {
+	p0, p1, p2, p3, p4 := mulS256(u, f)
+	q0, q1, q2, q3, q4 := mulS256(v, g)
+	p0, c := bits.Add64(p0, q0, 0)
+	p1, c = bits.Add64(p1, q1, c)
+	p2, c = bits.Add64(p2, q2, c)
+	p3, c = bits.Add64(p3, q3, c)
+	p4 += q4 + c
+	// plus j*m, a multiple of 2^s, below (2^(s+1) - 1) * m: over 2^s it lies in -m..2m
+	j := p0 * mp & (1<<s - 1)
+	h0, l0 := bits.Mul64(j, m.L0)
+	h1, l1 := bits.Mul64(j, m.L1)
+	h2, l2 := bits.Mul64(j, m.L2)
+	h3, l3 := bits.Mul64(j, m.L3)
+	l1, c = bits.Add64(l1, h0, 0)
+	l2, c = bits.Add64(l2, h1, c)
+	l3, c = bits.Add64(l3, h2, c)
+	h3 += c
+	p0, c = bits.Add64(p0, l0, 0)
+	p1, c = bits.Add64(p1, l1, c)
+	p2, c = bits.Add64(p2, l2, c)
+	p3, c = bits.Add64(p3, l3, c)
+	p4 += h3 + c
+	r0, r1, r2, r3 := p0>>s|p1<<(64-s), p1>>s|p2<<(64-s), p2>>s|p3<<(64-s), p3>>s|p4<<(64-s)
+	r4 := uint64(int64(p4) >> s)
+	// m back for a negative r, then m off unless that borrows
+	mn := uint64(int64(r4) >> 63)
+	r0, c = bits.Add64(r0, m.L0&mn, 0)
+	r1, c = bits.Add64(r1, m.L1&mn, c)
+	r2, c = bits.Add64(r2, m.L2&mn, c)
+	r3, c = bits.Add64(r3, m.L3&mn, c)
+	r4 += c
+	t0, b := bits.Sub64(r0, m.L0, 0)
+	t1, b := bits.Sub64(r1, m.L1, b)
+	t2, b := bits.Sub64(r2, m.L2, b)
+	t3, b := bits.Sub64(r3, m.L3, b)
+	_, b = bits.Sub64(r4, 0, b)
+	keep := -b
+	return Uint256{t0 ^ (r0^t0)&keep, t1 ^ (r1^t1)&keep, t2 ^ (r2^t2)&keep, t3 ^ (r3^t3)&keep}
 }

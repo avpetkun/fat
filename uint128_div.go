@@ -758,6 +758,58 @@ func (x Uint128) expMod(y, m Uint128) (Uint128, bool) {
 	return expModOdd128(b, y.Uint256(), m), false
 }
 
+// GCD returns the greatest common divisor of x and y, x for y == 0
+func (x Uint128) GCD(y Uint128) Uint128 {
+	if x.L0|x.L1 == 0 {
+		return y
+	}
+	if y.L0|y.L1 == 0 {
+		return x
+	}
+	// one division takes the difference in length at once,
+	// where a binary step removes a bit or two
+	if x.LessThan(y) {
+		x, y = y, x
+	}
+	x = x.mod(y)
+	if x.L0|x.L1 == 0 {
+		return y
+	}
+	// the common power of two, then both odd
+	tx, ty := x.TrailingZeros(), y.TrailingZeros()
+	return gcdOdd128(x.Rsh(tx), y.Rsh(ty)).Lsh(min(tx, ty))
+}
+
+// ModInverse returns y with x * y % m == 1 and true, or 0 and false where x
+// and m share a factor and none exists; for m == 1 it is 0 and true.
+// It panics for m == 0
+func (x Uint128) ModInverse(m Uint128) (Uint128, bool) {
+	if m.L0|m.L1 == 0 {
+		panic("fat.Uint128.ModInverse: division by zero")
+	}
+	if !x.LessThan(m) {
+		x = x.mod(m)
+	}
+	if m.L0&1 != 0 {
+		return invOdd128(x, m)
+	}
+	// an even m takes an odd x, and 1 is its own inverse
+	if x.L0&1 == 0 {
+		return Uint128{}, false
+	}
+	if x.L1 == 0 && x.L0 == 1 {
+		return x, true
+	}
+	// with m*t = 1 (mod x) from the odd modulus x, m*t = 1 + x*s
+	// and x*(m - s) = 1 (mod m), where s = m*t / x < m
+	t, ok := invOdd128(m.mod(x), x)
+	if !ok {
+		return Uint128{}, false
+	}
+	s, _, _ := m.mulDivMod(t, x)
+	return m.Subu(s), true
+}
+
 // expModEven128 is expModEven on 128 bits
 func expModEven128(b, y, m Uint128) Uint128 {
 	k := m.TrailingZeros()
@@ -1218,4 +1270,181 @@ func divFloatNear128(u1, u0, d1, d0, q, c, h, e, neg uint64) (float64, bool) {
 		return float64(c) * math.Float64frombits(e<<52|neg), bits.Len64(c)-bits.TrailingZeros64(c) <= 53
 	}
 	return float64(c+1-2*b) * math.Float64frombits(e<<52|neg), false
+}
+
+// gcdOdd128 is the GCD of a and b, by Pornin's optimized binary GCD while one
+// is past 64 bits, then by gcdOdd64. For an odd b and a nonzero a only
+func gcdOdd128(a, b Uint128) Uint128 {
+	for a.L1|b.L1 != 0 {
+		// approxOne128 inlines here, approx128 is a call: 1.5% on full widths
+		s := 95 - a.Or(b).LeadingZeros()
+		f0, g0, f1, g1 := gcdSteps31(approxOne128(a, s), approxOne128(b, s))
+		a, b = linAbs128(a, b, f0, g0), linAbs128(a, b, f1, g1)
+		if a.L0|a.L1 == 0 {
+			return b
+		}
+	}
+	// a stays nonzero: the loop returns on a zero one
+	return Uint128{gcdOdd64(a.L0>>uint(bits.TrailingZeros64(a.L0)), b.L0), 0}
+}
+
+// invOdd128 returns 1/x mod m and true, or false where x and m share a factor.
+// For an odd m and x < m only, else it gives a wrong result.
+// Pornin's optimized binary GCD of x and m keeps a = u*x and b = v*x (mod m),
+// u and v divided by 2^31 mod m per round as a and b are, so b = 1 leaves
+// v = 1/x with nothing to divide out. u and v take two rounds at once by the
+// product of their factors, and a and b go on in one limb once they fit
+func invOdd128(x, m Uint128) (Uint128, bool) {
+	if m.L1 == 0 {
+		r, ok := invOdd64(x.L0, m.L0)
+		return Uint128{r, 0}, ok
+	}
+	mp := montInv(m.L0)
+	a, b, u, v := x, m, Uint128{1, 0}, Uint128{}
+	// the factors of a round that waits for the next one
+	var p0, q0, p1, q1 int64
+	odd := false
+	for a.L1|b.L1 != 0 {
+		// a zero a leaves b, the GCD, past 64 bits
+		if a.L0|a.L1 == 0 {
+			return Uint128{}, false
+		}
+		f0, g0, f1, g1 := gcdSteps31(approx128(a, b))
+		na, sa := linOne128(a, b, f0, g0)
+		nb, sb := linOne128(a, b, f1, g1)
+		a, b = na, nb
+		f0, g0, f1, g1 = foldSigns(f0, g0, f1, g1, sa, sb)
+		if odd {
+			f0, g0, f1, g1 = matMul(f0, g0, f1, g1, p0, q0, p1, q1)
+			u, v = modLin128(u, v, f0, g0, 62, m, mp), modLin128(u, v, f1, g1, 62, m, mp)
+		}
+		p0, q0, p1, q1 = f0, g0, f1, g1
+		odd = !odd
+	}
+	// within 64 bits the approximations are the values themselves
+	c, d := a.L0, b.L0
+	for c != 0 {
+		f0, g0, f1, g1 := gcdSteps31(c, d)
+		nc, sc := linOne64(c, d, f0, g0)
+		nd, sd := linOne64(c, d, f1, g1)
+		c, d = nc, nd
+		f0, g0, f1, g1 = foldSigns(f0, g0, f1, g1, sc, sd)
+		if odd {
+			f0, g0, f1, g1 = matMul(f0, g0, f1, g1, p0, q0, p1, q1)
+			u, v = modLin128(u, v, f0, g0, 62, m, mp), modLin128(u, v, f1, g1, 62, m, mp)
+		}
+		p0, q0, p1, q1 = f0, g0, f1, g1
+		odd = !odd
+	}
+	if d != 1 {
+		return Uint128{}, false
+	}
+	if odd {
+		v = modLin128(u, v, p1, q1, 31, m, mp)
+	}
+	return v, true
+}
+
+// linOne64 is linOne128 on one limb
+func linOne64(a, b uint64, f, g int64) (uint64, uint64) {
+	// a negative f is uint64(f) - 2^64
+	h, l := bits.Mul64(a, uint64(f))
+	h -= a & uint64(f>>63)
+	k, m := bits.Mul64(b, uint64(g))
+	k -= b & uint64(g>>63)
+	l, c := bits.Add64(l, m, 0)
+	h += k + c
+	// below 2^95 in size: the shifted value is below 2^64 in size
+	n := uint64(int64(h) >> 63)
+	return (l>>31 | h<<33 ^ n) - n, n
+}
+
+// approxOne128 returns the low 31 bits of a under its bits s..s+32, one value
+// of approx128. For a < 2^(s+33) and s in 31..95 only
+func approxOne128(a Uint128, s int) uint64 {
+	return a.Rsh(s).L0<<31 | a.L0&(1<<31-1)
+}
+
+// approx128 returns the approximations of a and b for gcdSteps31: the low 31
+// bits under the 33 from the top bit of the longer one, or the values
+// themselves within 64 bits. For an a or b past 2^31 only
+func approx128(a, b Uint128) (uint64, uint64) {
+	// the window starts at bit s in 31..95
+	s := uint(max(95-a.Or(b).LeadingZeros(), 31))
+	r, hi := s&63, s&64 != 0
+	// <<1<<(^r&63) is <<(64-r), 0 at r = 0
+	wa := a.L0>>r | a.L1<<1<<(^r&63)
+	wb := b.L0>>r | b.L1<<1<<(^r&63)
+	if hi {
+		wa = a.L1 >> r
+	}
+	if hi {
+		wb = b.L1 >> r
+	}
+	return wa<<31 | a.L0&(1<<31-1), wb<<31 | b.L0&(1<<31-1)
+}
+
+// mulS128 returns a * f as three limbs of two's complement
+func mulS128(a Uint128, f int64) (p0, p1, p2 uint64) {
+	h0, p0 := bits.Mul64(a.L0, uint64(f))
+	h1, l1 := bits.Mul64(a.L1, uint64(f))
+	p1, c := bits.Add64(h0, l1, 0)
+	p2 = h1 + c
+	// a negative f is uint64(f) - 2^64
+	mf := uint64(f >> 63)
+	p1, c = bits.Sub64(p1, a.L0&mf, 0)
+	p2 -= a.L1&mf + c
+	return
+}
+
+// linAbs128 is linOne128 without the sign, for the GCD
+func linAbs128(a, b Uint128, f, g int64) Uint128 {
+	r, _ := linOne128(a, b, f, g)
+	return r
+}
+
+// linOne128 returns |a*f + b*g| / 2^31 and ^0 for a negative sum. For a sum
+// that is a multiple of 2^31 and |f| + |g| <= 2^31 only
+func linOne128(a, b Uint128, f, g int64) (Uint128, uint64) {
+	p0, p1, p2 := mulS128(a, f)
+	q0, q1, q2 := mulS128(b, g)
+	p0, c := bits.Add64(p0, q0, 0)
+	p1, c = bits.Add64(p1, q1, c)
+	p2 += q2 + c
+	// below 2^159 in size: the shifted value and its sign fit 129 bits
+	n := uint64(int64(p2) >> 63)
+	r0, r1 := p0>>31|p1<<33, p1>>31|p2<<33
+	r0, c = bits.Sub64(r0^n, n, 0)
+	r1, _ = bits.Sub64(r1^n, n, c)
+	return Uint128{r0, r1}, n
+}
+
+// modLin128 returns (u*f + v*g) / 2^s mod m, s 31 or 62. For u, v < m, an odd
+// m, mp = -1/m mod 2^64 and |f| + |g| <= 2^s only
+func modLin128(u, v Uint128, f, g int64, s uint, m Uint128, mp uint64) Uint128 {
+	p0, p1, p2 := mulS128(u, f)
+	q0, q1, q2 := mulS128(v, g)
+	p0, c := bits.Add64(p0, q0, 0)
+	p1, c = bits.Add64(p1, q1, c)
+	p2 += q2 + c
+	// plus j*m, a multiple of 2^s, below (2^(s+1) - 1) * m: over 2^s it lies in -m..2m
+	j := p0 * mp & (1<<s - 1)
+	h0, l0 := bits.Mul64(j, m.L0)
+	h1, l1 := bits.Mul64(j, m.L1)
+	l1, c = bits.Add64(l1, h0, 0)
+	h1 += c
+	p0, c = bits.Add64(p0, l0, 0)
+	p1, c = bits.Add64(p1, l1, c)
+	p2 += h1 + c
+	r0, r1, r2 := p0>>s|p1<<(64-s), p1>>s|p2<<(64-s), uint64(int64(p2)>>s)
+	// m back for a negative r, then m off unless that borrows
+	mn := uint64(int64(r2) >> 63)
+	r0, c = bits.Add64(r0, m.L0&mn, 0)
+	r1, c = bits.Add64(r1, m.L1&mn, c)
+	r2 += c
+	t0, b := bits.Sub64(r0, m.L0, 0)
+	t1, b := bits.Sub64(r1, m.L1, b)
+	_, b = bits.Sub64(r2, 0, b)
+	keep := -b
+	return Uint128{t0 ^ (r0^t0)&keep, t1 ^ (r1^t1)&keep}
 }

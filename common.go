@@ -384,3 +384,120 @@ func expModMont64(b uint64, y Uint256, m uint64) uint64 {
 	// out of the Montgomery form
 	return montMul64(r, 1, m, mp)
 }
+
+// gcdSteps31 runs 31 halvings of the binary GCD on a and b, the approximations
+// of Pornin's optimized binary GCD (eprint 2020/972): the low 31 bits of a
+// value exact, its top 33 bits at the length of the longer one. It returns
+// f0, g0, f1, g1 with a*f0 + b*g0 and a*f1 + b*g1 multiples of 2^31 for the
+// exact values, |f| + |g| <= 2^31 in each pair. For an odd b only
+func gcdSteps31(a, b uint64) (f0, g0, f1, g1 int64) {
+	f0, g1 = 1, 1
+	// the factors of 2 of a at once: only the low 31 - i bits of a are exact
+	i := bits.TrailingZeros64(a)
+	if i >= 31 {
+		return f0, g0, f1 << 31, g1 << 31
+	}
+	a >>= uint(i)
+	f1 <<= uint(i)
+	g1 <<= uint(i)
+	for {
+		// an odd a: |a - b| and the smaller one by masks, as which one is
+		// larger follows no pattern, the factors along. The zeros of a - b
+		// are those of |a - b|, counted beside the negation
+		d, bw := bits.Sub64(a, b, 0)
+		k := bits.TrailingZeros64(d)
+		m := -bw
+		b += d & m
+		a = (d ^ m) - m
+		sm := int64(m)
+		df := f0 - f1
+		f1 += df & sm
+		f0 = (df ^ sm) - sm
+		dg := g0 - g1
+		g1 += dg & sm
+		g0 = (dg ^ sm) - sm
+		if i+k >= 31 {
+			k = 31 - i
+			return f0, g0, f1 << uint(k), g1 << uint(k)
+		}
+		i += k
+		a >>= uint(k) & 63
+		f1 <<= uint(k) & 63
+		g1 <<= uint(k) & 63
+	}
+}
+
+// foldSigns negates the factors of a round where its sum came out negative,
+// na and nb being 0 or ^0, so the sums of the next round need no sign
+func foldSigns(f0, g0, f1, g1 int64, na, nb uint64) (int64, int64, int64, int64) {
+	sa, sb := int64(na), int64(nb)
+	return (f0 ^ sa) - sa, (g0 ^ sa) - sa, (f1 ^ sb) - sb, (g1 ^ sb) - sb
+}
+
+// matMul returns the factors of the round f after the round p. Two rounds of
+// gcdSteps31 give |f| + |g| <= 2^62 in each pair, within an int64
+func matMul(f0, g0, f1, g1, p0, q0, p1, q1 int64) (int64, int64, int64, int64) {
+	return f0*p0 + g0*p1, f0*q0 + g0*q1, f1*p0 + g1*p1, f1*q0 + g1*q1
+}
+
+// gcdOdd64 is the binary GCD of a and b.
+// For odd a and b only, else it gives a wrong result or never returns
+func gcdOdd64(a, b uint64) uint64 {
+	for a != b {
+		// the smaller one and |a - b| by masks, which is larger follows no
+		// pattern; the zeros of a - b are those of |a - b|, counted beside it
+		d, bw := bits.Sub64(a, b, 0)
+		k := uint(bits.TrailingZeros64(d)) & 63
+		m := -bw
+		b += d & m
+		a = ((d ^ m) - m) >> k
+	}
+	return a
+}
+
+// invOdd64 returns 1/x mod m and true, or false where x and m share a factor,
+// as invOdd128 on one limb. For an odd m and x < m only
+func invOdd64(x, m uint64) (uint64, bool) {
+	if x == 0 {
+		return 0, m == 1
+	}
+	u, v, r, s := m, x, uint64(0), uint64(1)
+	k := bits.TrailingZeros64(v)
+	v >>= uint(k)
+	for u != v {
+		d, bw := bits.Sub64(u, v, 0)
+		sw := -bw
+		pl, ps := s^(r^s)&sw, r^(r^s)&sw
+		d = (d ^ sw) - sw
+		t := bits.TrailingZeros64(d)
+		d >>= uint(t)
+		sum, pl := ps+pl, pl<<uint(t)
+		u, v = d^(u^d)&sw, v^(v^d)&sw
+		s, r = pl^(sum^pl)&sw, sum^(pl^sum)&sw
+		k += t
+	}
+	if u != 1 {
+		return 0, false
+	}
+	// the last step of the almost inverse, then m - r = 2^k/x mod m
+	r2, c := bits.Add64(r, r, 0)
+	r3, b := bits.Sub64(r2, m, 0)
+	if c >= b {
+		r2 = r3
+	}
+	return halve64(m-r2, k+1, m, montInv(m)), true
+}
+
+// halve64 returns a / 2^k mod m as halve128 does on one limb.
+// For a < m, an odd m and mp = -1/m mod 2^64 only
+func halve64(a uint64, k int, m, mp uint64) uint64 {
+	for k > 0 {
+		s := uint(min(k, 63))
+		j := a * mp & (1<<s - 1)
+		h, l := bits.Mul64(j, m)
+		l, c := bits.Add64(l, a, 0)
+		a = l>>s | (h+c)<<(64-s)
+		k -= int(s)
+	}
+	return a
+}

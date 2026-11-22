@@ -383,6 +383,12 @@ func BenchmarkInt256(b *testing.B) {
 			sinkI256 = x[i&BenchMask].SubMod(y[i&BenchMask], y[(i+1)&BenchMask])
 		}
 	})
+	b.Run("op=GCD", func(b *testing.B) {
+		x, y := in.i256, in.j256
+		for i := range b.N {
+			sinkU256 = x[i&BenchMask].GCD(y[i&BenchMask])
+		}
+	})
 	b.Run("op=Mul64o", func(b *testing.B) {
 		x, y := in.i256, in.i64
 		for i := range b.N {
@@ -764,6 +770,11 @@ func TestInt256Bits(t *testing.T) { RunBits(t, kI256) }
 
 // TestInt256Cmp checks the comparisons and CmpBig against big.Int
 func TestInt256Cmp(t *testing.T) { RunCmp(t, kI256) }
+
+// TestInt256GCD checks GCD with big.Int, MinInt256 with 0 among the pairs
+func TestInt256GCD(t *testing.T) {
+	RunGCD(t, kI256, func(x, y Int256) *big.Int { return RefU256(x.GCD(y)) })
+}
 
 // TestInt256Ops64 checks the methods with an int64 operand against big.Int
 func TestInt256Ops64(t *testing.T) { RunOps64(t, kI256) }

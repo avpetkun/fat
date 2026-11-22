@@ -477,6 +477,26 @@ func BenchmarkUint128(b *testing.B) {
 			sinkU128 = x[i&BenchMask].SubMod(y[i&BenchMask], y[(i+1)&BenchMask])
 		}
 	})
+	b.Run("op=GCD", func(b *testing.B) {
+		x, y := in.u128, in.v128
+		for i := range b.N {
+			sinkU128 = x[i&BenchMask].GCD(y[i&BenchMask])
+		}
+	})
+	// nonzero moduli of either parity: y with bit 1 set
+	invM := sync.OnceValue(func() []Uint128 {
+		m := make([]Uint128, len(in.v128))
+		for i, v := range in.v128 {
+			m[i] = v.Or(NewUint128(2))
+		}
+		return m
+	})
+	b.Run("op=ModInverse", func(b *testing.B) {
+		x, m := in.u128, invM()
+		for i := range b.N {
+			sinkU128, SinkBool = x[i&BenchMask].ModInverse(m[i&BenchMask])
+		}
+	})
 	b.Run("op=Div64", func(b *testing.B) {
 		x, y := in.u128, in.u64
 		for i := range b.N {
@@ -745,6 +765,14 @@ func TestUint128Bits(t *testing.T) { RunBits(t, kU128) }
 
 // TestUint128Cmp checks Cmp, the comparisons and CmpBig with big.Int
 func TestUint128Cmp(t *testing.T) { RunCmp(t, kU128) }
+
+// TestUint128GCD checks GCD with big.Int
+func TestUint128GCD(t *testing.T) {
+	RunGCD(t, kU128, func(x, y Uint128) *big.Int { return RefU128(x.GCD(y)) })
+}
+
+// TestUint128ModInverse checks ModInverse with big.Int
+func TestUint128ModInverse(t *testing.T) { RunModInverse(t, kU128, Uint128.ModInverse) }
 
 // TestUint128Ops64 checks the methods with a uint64 operand with big.Int
 func TestUint128Ops64(t *testing.T) { RunOps64(t, kU128) }

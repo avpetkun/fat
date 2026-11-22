@@ -1559,6 +1559,12 @@ func (x Int256) ExpMod(y, m Int256) Int256 {
 	return r
 }
 
+// GCD returns the greatest common divisor of |x| and |y|, |x| for y == 0, as a
+// Uint256: GCD(MinInt256, 0) is 2^255
+func (x Int256) GCD(y Int256) Uint256 {
+	return x.UnsignedAbs().GCD(y.UnsignedAbs())
+}
+
 // DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
 // It panics for y == 0
 func (x Int256) DivToFloat64(y Int256) float64 {
