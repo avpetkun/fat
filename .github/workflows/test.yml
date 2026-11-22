@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test every architecture
+        run: |
+          mkdir cover
+          go test -tags arch_generic -cover . -args -test.gocoverdir=$PWD/cover
+          go test -tags arch_amd64 -cover . -args -test.gocoverdir=$PWD/cover
+      - name: 100% coverage
+        run: |
+          go tool covdata percent -i=cover
+          go tool covdata textfmt -i=cover -o cover.out
+          uncovered=$(awk 'NR > 1 && $NF == 0 { print $1 }' cover.out)
+          if [ -n "$uncovered" ]; then
+            echo "$uncovered"
+            echo "::error::coverage is below 100%"
+            exit 1
+          fi
