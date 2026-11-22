@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"math/bits"
 )
@@ -28,6 +29,43 @@ func MustUint256FromBig(v *big.Int) Uint256 {
 	if err != 0 {
 		// a table lookup and not a call keeps it within the inline budget
 		panic(mustUint256FromBigPanics[err&3])
+	}
+	return x
+}
+
+// Uint256FromFloat64 returns v truncated toward zero and whether it fits.
+// It returns zero and false for a NaN, for v <= -1 and for v >= 2^256
+func Uint256FromFloat64(v float64) (Uint256, bool) {
+	b := math.Float64bits(v)
+	// the exponent with the sign above it is past 255 for v < 0,
+	// an infinity and a NaN, and by the wrap for |v| < 1
+	t := b>>52 - 1023
+	if t >= 256 {
+		// |v| < 1 is zero with either sign
+		return Uint256{}, b<<1 < 1023<<53
+	}
+	// the 53 mantissa bits on top of a word: the top one goes to bit t&63
+	// of limb t/64, those shifted out to the limb below
+	h := b<<11 | 1<<63
+	top, under := h>>(^t&63), h<<1<<(t&63)
+	// the two limbs move into place by conditional moves on the bits of t/64,
+	// first by one limb, then by two
+	wm, w0, w1 := under, top, uint64(0)
+	if t&64 != 0 {
+		wm, w0, w1 = 0, under, top
+	}
+	l0, l1, l2, l3 := w0, w1, uint64(0), uint64(0)
+	if t&128 != 0 {
+		l0, l1, l2, l3 = 0, wm, w0, w1
+	}
+	return Uint256{l0, l1, l2, l3}, true
+}
+
+// MustUint256FromFloat64 is Uint256FromFloat64 that panics when v does not fit
+func MustUint256FromFloat64(v float64) Uint256 {
+	x, ok := Uint256FromFloat64(v)
+	if !ok {
+		panic("fat.MustUint256FromFloat64: out of range")
 	}
 	return x
 }
@@ -201,6 +239,39 @@ func (x Uint256) Int256o() (r Int256, overflow bool) {
 // Int256u returns the bits of x as a Go conversion does
 func (x Uint256) Int256u() Int256 {
 	return Int256(x)
+}
+
+// Float64 returns the float64 nearest to x, a tie goes to the even one
+func (x Uint256) Float64() float64 {
+	// one limb converts natively and the test inlines: faster below 2^64
+	// in our benchmarks, though mixed lengths pay for the branch
+	if x.L1|x.L2|x.L3 == 0 {
+		return float64(x.L0)
+	}
+	return x.float64()
+}
+
+// float64 is Float64 for any x, without a branch
+func (x Uint256) float64() float64 {
+	// the top limb and the one under it with the exponent of their place,
+	// the limbs below as a sticky bit
+	hi, lo, st, e := x.L1, x.L0, uint64(0), uint64(1023<<52)
+	if x.L2 != 0 {
+		hi, lo, st, e = x.L2, x.L1, x.L0, (1023+64)<<52
+	}
+	if x.L3 != 0 {
+		hi, lo, st, e = x.L3, x.L2, x.L1|x.L0, (1023+128)<<52
+	}
+	// a sticky bit stands only under a top limb,
+	// at least 11 bits below the last place
+	lo |= (st | -st) >> 63
+	// Uint128.Float64 on the two limbs
+	lb, hb := lo, lo>>52|hi<<12
+	lb2, hb2 := lo>>24|hi<<40|lo&0xFFFFFF, hi>>12
+	if hi >= 1<<40 {
+		lb, hb, e = lb2, hb2, e+24<<52
+	}
+	return (float64(int64(hb))*0x1p52 + float64(int64(lb&(1<<52-1)))) * math.Float64frombits(e)
 }
 
 // Big returns x as a new big.Int

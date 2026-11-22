@@ -1540,3 +1540,163 @@ func (x Int256) MulMod(y, m Int256) Int256 {
 	r3, _ := bits.Sub64(ra.L3^mr, mr, b)
 	return Int256{r0, r1, r2, r3}
 }
+
+// DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
+// It panics for y == 0
+func (x Int256) DivToFloat64(y Int256) float64 {
+	// Uint256.DivToFloat64 on |x| and |y|, those picked by conditional moves
+	x0, b := bits.Sub64(0, x.L0, 0)
+	x1, b := bits.Sub64(0, x.L1, b)
+	x2, b := bits.Sub64(0, x.L2, b)
+	x3, _ := bits.Sub64(0, x.L3, b)
+	if int64(x.L3) >= 0 {
+		x0, x1, x2, x3 = x.L0, x.L1, x.L2, x.L3
+	}
+	y0, b := bits.Sub64(0, y.L0, 0)
+	y1, b := bits.Sub64(0, y.L1, b)
+	y2, b := bits.Sub64(0, y.L2, b)
+	y3, _ := bits.Sub64(0, y.L3, b)
+	if int64(y.L3) >= 0 {
+		y0, y1, y2, y3 = y.L0, y.L1, y.L2, y.L3
+	}
+	neg := (x.L3 ^ y.L3) & (1 << 63)
+	xh, xm, xl, nx := x3, x2, x1, uint64(0)
+	if x3|x2 == 0 {
+		xh, xm, xl, nx = x1, x0, 0, 2
+	}
+	if xh == 0 {
+		xh, xm, nx = xm, xl, nx+1
+	}
+	yh, ym, yl, ny := y3, y2, y1, uint64(0)
+	if y3|y2 == 0 {
+		yh, ym, yl, ny = y1, y0, 0, 2
+	}
+	if yh == 0 {
+		yh, ym, ny = ym, yl, ny+1
+	}
+	if arch.IsAmd64 {
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			q, _ := bits.Div64(u, 0, d)
+			if (q-1<<10+2)&(1<<11-1) > 3 {
+				return float64(int64(q>>1))*math.Float64frombits(e<<52|neg) + 0
+			}
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q-1<<10+3)&(1<<11-1) > 4 {
+				return float64(q)*math.Float64frombits(e<<52|neg) + 0
+			}
+		}
+	}
+	return divFloatExact(Uint256{x0, x1, x2, x3}, Uint256{y0, y1, y2, y3}, neg, "fat.Int256.DivToFloat64: division by zero")
+}
+
+// DivToFloat64x returns DivToFloat64 and whether it is exactly x / y.
+// It panics for y == 0
+func (x Int256) DivToFloat64x(y Int256) (float64, bool) {
+	// DivToFloat64 with digits next to a multiple of 2^10 left to divFloatNear.
+	// An exact quotient ends at a multiple of 2^11, zero numerators included.
+	// Only y = 0 has no top bit in d
+	x0, b := bits.Sub64(0, x.L0, 0)
+	x1, b := bits.Sub64(0, x.L1, b)
+	x2, b := bits.Sub64(0, x.L2, b)
+	x3, _ := bits.Sub64(0, x.L3, b)
+	if int64(x.L3) >= 0 {
+		x0, x1, x2, x3 = x.L0, x.L1, x.L2, x.L3
+	}
+	y0, b := bits.Sub64(0, y.L0, 0)
+	y1, b := bits.Sub64(0, y.L1, b)
+	y2, b := bits.Sub64(0, y.L2, b)
+	y3, _ := bits.Sub64(0, y.L3, b)
+	if int64(y.L3) >= 0 {
+		y0, y1, y2, y3 = y.L0, y.L1, y.L2, y.L3
+	}
+	neg := (x.L3 ^ y.L3) & (1 << 63)
+	xh, xm, xl, nx := x3, x2, x1, uint64(0)
+	if x3|x2 == 0 {
+		xh, xm, xl, nx = x1, x0, 0, 2
+	}
+	if xh == 0 {
+		xh, xm, nx = xm, xl, nx+1
+	}
+	yh, ym, yl, ny := y3, y2, y1, uint64(0)
+	if y3|y2 == 0 {
+		yh, ym, yl, ny = y1, y0, 0, 2
+	}
+	if yh == 0 {
+		yh, ym, ny = ym, yl, ny+1
+	}
+	if arch.IsAmd64 {
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			q, _ := bits.Div64(u, 0, d)
+			if (q+2)&(1<<10-1) > 3 {
+				return float64(int64(q>>1))*math.Float64frombits(e<<52|neg) + 0, false
+			}
+			return divFloatNear(Uint256{x0, x1, x2, x3}, Uint256{y0, y1, y2, y3}, q, (q+2)&^(1<<10-1), (nx-ny)<<6+uint64(ly)-uint64(lx)+64-h, e-1, neg)
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q+3)&(1<<10-1) > 4 {
+				return float64(q)*math.Float64frombits(e<<52|neg) + 0, false
+			}
+			return divFloatNear(Uint256{x0, x1, x2, x3}, Uint256{y0, y1, y2, y3}, q, (q+3)&^(1<<10-1), (nx-ny)<<6+uint64(sx)-uint64(sy)+64-h, e, neg)
+		}
+	}
+	panic("fat.Int256.DivToFloat64x: division by zero")
+}

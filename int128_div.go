@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/bits"
 
 	"github.com/avpetkun/fat/internal/arch"
@@ -974,4 +975,165 @@ func (x Int128) MulMod(y, m Int128) Int128 {
 	r0, b := bits.Sub64(ra.L0^mr, mr, 0)
 	r1, _ := bits.Sub64(ra.L1^mr, mr, b)
 	return Int128{r0, r1}
+}
+
+// DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
+// It panics for y == 0
+func (x Int128) DivToFloat64(y Int128) float64 {
+	// Uint128.DivToFloat64 on |x| and |y|, taken by conditional moves.
+	// On amd64 (v ^ m) - m is faster, elsewhere a little slower
+	var x0, x1, y0, y1, b uint64
+	if arch.IsAmd64 {
+		mx, my := uint64(int64(x.L1)>>63), uint64(int64(y.L1)>>63)
+		x0, b = bits.Sub64(x.L0^mx, mx, 0)
+		x1, _ = bits.Sub64(x.L1^mx, mx, b)
+		y0, b = bits.Sub64(y.L0^my, my, 0)
+		y1, _ = bits.Sub64(y.L1^my, my, b)
+	} else {
+		x0, b = bits.Sub64(0, x.L0, 0)
+		x1, _ = bits.Sub64(0, x.L1, b)
+		if int64(x.L1) >= 0 {
+			x0, x1 = x.L0, x.L1
+		}
+		y0, b = bits.Sub64(0, y.L0, 0)
+		y1, _ = bits.Sub64(0, y.L1, b)
+		if int64(y.L1) >= 0 {
+			y0, y1 = y.L0, y.L1
+		}
+	}
+	neg := (x.L1 ^ y.L1) & (1 << 63)
+	xh, xm, nx := x1, x0, uint64(0)
+	if x1 == 0 {
+		xh, xm, nx = x0, 0, 1
+	}
+	yh, ym, ny := y1, y0, uint64(0)
+	if y1 == 0 {
+		yh, ym, ny = y0, 0, 1
+	}
+	if arch.IsAmd64 {
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			q, _ := bits.Div64(u, 0, d)
+			if (q-1<<10+2)&(1<<11-1) > 3 {
+				return float64(int64(q>>1))*math.Float64frombits(e<<52|neg) + 0
+			}
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q-1<<10+3)&(1<<11-1) > 4 {
+				return float64(q)*math.Float64frombits(e<<52|neg) + 0
+			}
+		}
+	}
+	return divFloatExact(Uint256{x0, x1, 0, 0}, Uint256{y0, y1, 0, 0}, neg, "fat.Int128.DivToFloat64: division by zero")
+}
+
+// DivToFloat64x returns DivToFloat64 and whether it is exactly x / y.
+// It panics for y == 0
+func (x Int128) DivToFloat64x(y Int128) (float64, bool) {
+	// DivToFloat64 with digits near a multiple of 2^10 left to divFloatNear128.
+	// An exact quotient ends at a multiple of 2^11, a zero numerator included.
+	// Only y == 0 has no top bit in d
+	var x0, x1, y0, y1, b uint64
+	if arch.IsAmd64 {
+		mx, my := uint64(int64(x.L1)>>63), uint64(int64(y.L1)>>63)
+		x0, b = bits.Sub64(x.L0^mx, mx, 0)
+		x1, _ = bits.Sub64(x.L1^mx, mx, b)
+		y0, b = bits.Sub64(y.L0^my, my, 0)
+		y1, _ = bits.Sub64(y.L1^my, my, b)
+	} else {
+		x0, b = bits.Sub64(0, x.L0, 0)
+		x1, _ = bits.Sub64(0, x.L1, b)
+		if int64(x.L1) >= 0 {
+			x0, x1 = x.L0, x.L1
+		}
+		y0, b = bits.Sub64(0, y.L0, 0)
+		y1, _ = bits.Sub64(0, y.L1, b)
+		if int64(y.L1) >= 0 {
+			y0, y1 = y.L0, y.L1
+		}
+	}
+	neg := (x.L1 ^ y.L1) & (1 << 63)
+	xh, xm, nx := x1, x0, uint64(0)
+	if x1 == 0 {
+		xh, xm, nx = x0, 0, 1
+	}
+	yh, ym, ny := y1, y0, uint64(0)
+	if y1 == 0 {
+		yh, ym, ny = y0, 0, 1
+	}
+	if arch.IsAmd64 {
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u1 := u
+		u >>= h & 1
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			q, _ := bits.Div64(u, 0, d)
+			if (q+2)&(1<<10-1) > 3 {
+				return float64(int64(q>>1))*math.Float64frombits(e<<52|neg) + 0, false
+			}
+			return divFloatNear128(u1, xm<<(-lx&63), d, ym<<(-ly&63), q, (q+2)&^(1<<10-1), h, e-1, neg)
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u1 := u
+		u >>= h & 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q+3)&(1<<10-1) > 4 {
+				return float64(q)*math.Float64frombits(e<<52|neg) + 0, false
+			}
+			return divFloatNear128(u1, xm<<(sx&63), d, ym<<(sy&63), q, (q+3)&^(1<<10-1), h, e, neg)
+		}
+	}
+	panic("fat.Int128.DivToFloat64x: division by zero")
 }

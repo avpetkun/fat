@@ -1427,3 +1427,239 @@ func knuthStep4m(a4, a3, a2, a1, a0, d3, d2, d1, d0, v uint64) (q, r3, r2, r1, r
 	}
 	return q, r3, r2, r1, r0
 }
+
+// DivToFloat64 returns the float64 nearest to x / y, ties go to the even one.
+// It panics for y == 0
+func (x Uint256) DivToFloat64(y Uint256) float64 {
+	// the top limb of each and the one under it,
+	// first the half with it and then the limb in the half.
+	// nx and ny count the limbs above them
+	xh, xm, xl, nx := x.L3, x.L2, x.L1, uint64(0)
+	if x.L3|x.L2 == 0 {
+		xh, xm, xl, nx = x.L1, x.L0, 0, 2
+	}
+	if xh == 0 {
+		xh, xm, nx = xm, xl, nx+1
+	}
+	yh, ym, yl, ny := y.L3, y.L2, y.L1, uint64(0)
+	if y.L3|y.L2 == 0 {
+		yh, ym, yl, ny = y.L1, y.L0, 0, 2
+	}
+	if yh == 0 {
+		yh, ym, ny = ym, yl, ny+1
+	}
+	// u and d are the top 64 bits of x and y from their top bits on,
+	// u halved when it is not below d.
+	// The digit q = u * 2^64 / d has 64 bits,
+	// and the rest of x and y moves the quotient by less than 2 either way.
+	// So q rounds to the float of the quotient unless a middle between floats,
+	// an odd multiple of 2^10, lies as near.
+	// Those and y = 0, which has no top bit, are left to divFloatExact
+	if arch.IsAmd64 {
+		// the shifts by the bit lengths, BSR gives those there
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		// the exponent of half the digit
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			// one hardware division gives the digit itself,
+			// so the quotient lies above q-2 and below q+3.
+			// Away from a middle bit 0 of q changes nothing,
+			// and q>>1 converts as a signed word with no branch
+			q, _ := bits.Div64(u, 0, d)
+			if (q-1<<10+2)&(1<<11-1) > 3 {
+				return float64(int64(q>>1)) * math.Float64frombits(e<<52)
+			}
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		// the exponent of the digit, ^sx is -sx - 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			// reciprocal2by1 without its last step is exact or one less.
+			// For t = d/2^64 the digit by it is less than 2t + 1 short
+			// and the bits under u add less than 1/t,
+			// so the quotient lies above q-2 and below q+4:
+			// 2t + 1/t is at most 3 for t from 1/2 to 1
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q-1<<10+3)&(1<<11-1) > 4 {
+				return float64(q) * math.Float64frombits(e<<52)
+			}
+		}
+	}
+	return divFloatExact(x, y, 0, "fat.Uint256.DivToFloat64: division by zero")
+}
+
+// DivToFloat64x returns DivToFloat64 and whether it is exactly x / y.
+// It panics for y == 0
+func (x Uint256) DivToFloat64x(y Uint256) (float64, bool) {
+	// DivToFloat64 with the digits next to any multiple of 2^10
+	// left to divFloatNear: an exact quotient ends at a multiple of 2^11,
+	// a zero numerator among them.
+	// Only y = 0 has no top bit in d
+	xh, xm, xl, nx := x.L3, x.L2, x.L1, uint64(0)
+	if x.L3|x.L2 == 0 {
+		xh, xm, xl, nx = x.L1, x.L0, 0, 2
+	}
+	if xh == 0 {
+		xh, xm, nx = xm, xl, nx+1
+	}
+	yh, ym, yl, ny := y.L3, y.L2, y.L1, uint64(0)
+	if y.L3|y.L2 == 0 {
+		yh, ym, yl, ny = y.L1, y.L0, 0, 2
+	}
+	if yh == 0 {
+		yh, ym, ny = ym, yl, ny+1
+	}
+	if arch.IsAmd64 {
+		lx, ly := uint(bits.Len64(xh)), uint(bits.Len64(yh))
+		u := xh<<(-lx&63) | xm>>1>>((lx-1)&63)
+		d := yh<<(-ly&63) | ym>>1>>((ly-1)&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(lx) - uint64(ly) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			q, _ := bits.Div64(u, 0, d)
+			if (q+2)&(1<<10-1) > 3 {
+				return float64(int64(q>>1)) * math.Float64frombits(e<<52), false
+			}
+			return divFloatNear(x, y, q, (q+2)&^(1<<10-1), (nx-ny)<<6+uint64(ly)-uint64(lx)+64-h, e-1, 0)
+		}
+	} else {
+		sx, sy := uint(bits.LeadingZeros64(xh)), uint(bits.LeadingZeros64(yh))
+		tx := ^sx
+		u := xh<<(sx&63) | xm>>1>>(tx&63)
+		d := yh<<(sy&63) | ym>>1>>(^sy&63)
+		var h uint64
+		if u >= d {
+			h = 1
+		}
+		u >>= h & 1
+		e := uint64(tx) + uint64(sy) + (ny-nx)<<6 + h + (1023 - 64 + 1)
+		if int64(d) < 0 {
+			v := (1<<47 - 1) / (d>>40 + 1)
+			d0 := d & 1
+			t := (v>>1)&-d0 - v*(d>>1+d0)
+			hi, _ := bits.Mul64(t, t)
+			t += hi >> 22
+			hi, _ = bits.Mul64(v<<19, t)
+			v = v<<41 + hi
+			hi, _ = bits.Mul64(v, u)
+			q := u + hi
+			if (q+3)&(1<<10-1) > 4 {
+				return float64(q) * math.Float64frombits(e<<52), false
+			}
+			return divFloatNear(x, y, q, (q+3)&^(1<<10-1), (nx-ny)<<6+uint64(sx)-uint64(sy)+64-h, e, 0)
+		}
+	}
+	panic("fat.Uint256.DivToFloat64x: division by zero")
+}
+
+// divFloatExact is DivToFloat64 by the whole of x and y, neg is the sign bit.
+// It panics with zero for y == 0.
+// The 64-bit digit with its remainder as one more bit rounds the quotients
+// that the top bits alone do not
+func divFloatExact(x, y Uint256, neg uint64, zero string) float64 {
+	if y.IsZero() {
+		panic(zero)
+	}
+	// both shifted to their top bits,
+	// x halved when its top limb is not below that of y
+	sx, sy := x.LeadingZeros(), y.LeadingZeros()
+	x, y = x.Lsh(sx), y.Lsh(sy)
+	e := uint64(1023 - 64 + sy - sx)
+	a4, a3, a2, a1, a0 := x.L3, x.L2, x.L1, x.L0, uint64(0)
+	if x.L3 >= y.L3 {
+		a4, a3, a2, a1, a0 = x.L3>>1, x.L3<<63|x.L2>>1, x.L2<<63|x.L1>>1, x.L1<<63|x.L0>>1, x.L0<<63
+		e++
+	}
+	q, r3, r2, r1, r0 := knuthStep4m(a4, a3, a2, a1, a0, y.L3, y.L2, y.L1, y.L0, reciprocal3by2m(y.L3, y.L2))
+	r := r3 | r2 | r1 | r0
+	return float64(q|(r|-r)>>63) * math.Float64frombits(e<<52|neg)
+}
+
+// divFloatNear ends DivToFloat64x for a digit q next to c, a multiple of 2^10.
+// x * 2^d against c * y tells the side of c the quotient lies on,
+// which rounds it, and whether it is c itself.
+// d is the leading zeros of x less those of y plus the 64 or 63 of the digit,
+// e the exponent of the digit and neg the sign bit
+func divFloatNear(x, y Uint256, q, c, d, e, neg uint64) (float64, bool) {
+	if c == 0 {
+		// a zero numerator, else c is 2^64 with q all ones under it
+		if q == 0 {
+			return 0, true
+		}
+		return float64(q) * math.Float64frombits(e<<52|neg), false
+	}
+	h0, p0 := bits.Mul64(c, y.L0)
+	h1, l1 := bits.Mul64(c, y.L1)
+	h2, l2 := bits.Mul64(c, y.L2)
+	h3, l3 := bits.Mul64(c, y.L3)
+	p1, cy := bits.Add64(h0, l1, 0)
+	p2, cy := bits.Add64(h1, l2, cy)
+	p3, cy := bits.Add64(h2, l3, cy)
+	p4 := h3 + cy
+	// only one side is shifted, x up by d or the product up by -d:
+	// either stays within 5 limbs
+	a4, a3, a2, a1, a0 := uint64(0), x.L3, x.L2, x.L1, x.L0
+	b4, b3, b2, b1, b0 := p4, p3, p2, p1, p0
+	n := d
+	if int64(d) < 0 {
+		a4, a3, a2, a1, a0, b4, b3, b2, b1, b0, n = p4, p3, p2, p1, p0, 0, x.L3, x.L2, x.L1, x.L0, -d
+	}
+	// bits within limbs, then whole limbs by conditional moves, as Uint256.lsh
+	s, t := n&63, ^n&63
+	a4 = a4<<s | a3>>1>>t
+	a3 = a3<<s | a2>>1>>t
+	a2 = a2<<s | a1>>1>>t
+	a1 = a1<<s | a0>>1>>t
+	a0 <<= s
+	if n&64 != 0 {
+		a4, a3, a2, a1, a0 = a3, a2, a1, a0, 0
+	}
+	if n&128 != 0 {
+		a4, a3, a2, a1, a0 = a2, a1, a0, 0, 0
+	}
+	if n > 255 {
+		a4, a3, a2, a1, a0 = a0, 0, 0, 0, 0
+	}
+	_, b := bits.Sub64(a0, b0, 0)
+	_, b = bits.Sub64(a1, b1, b)
+	_, b = bits.Sub64(a2, b2, b)
+	_, b = bits.Sub64(a3, b3, b)
+	_, b = bits.Sub64(a4, b4, b)
+	if (a0^b0)|(a1^b1)|(a2^b2)|(a3^b3)|(a4^b4) == 0 {
+		// the quotient is c: a float when its 53 bits hold it,
+		// else a tie that the conversion takes to the even one
+		return float64(c) * math.Float64frombits(e<<52|neg), bits.Len64(c)-bits.TrailingZeros64(c) <= 53
+	}
+	// one off c toward the quotient rounds as it does:
+	// the shifted side below the other is x below when it is x
+	b ^= d >> 63
+	return float64(c+1-2*b) * math.Float64frombits(e<<52|neg), false
+}

@@ -690,6 +690,22 @@ func BenchmarkUint128Convert(b *testing.B) {
 			sinkU128, _ = Uint128FromBig(x[i&BenchMask])
 		}
 	})
+	b.Run("op=Float64", func(b *testing.B) {
+		x := in.u128
+		for i := range b.N {
+			SinkFloat = x[i&BenchMask].Float64()
+		}
+	})
+	b.Run("op=FromFloat64", func(b *testing.B) {
+		x := make([]float64, len(in.u128))
+		for i, v := range in.u128 {
+			x[i] = v.Float64()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			sinkU128, SinkBool = Uint128FromFloat64(x[i&BenchMask])
+		}
+	})
 	b.Run("op=CmpBig", func(b *testing.B) {
 		x := in.u128
 		for i := range b.N {
@@ -711,9 +727,9 @@ func narrowUint128(y Uint128, width int) Uint128 {
 var kU128 = Kind[Uint128]{
 	Name: "Uint128", Bits: 128,
 	Ref: RefU128, Wrap: WrapU128, Fits: FitsU128,
-	FromBig: MustUint128FromBig,
-	Max:     MaxUint128(),
-	Values:  Values128, Pairs: Pairs128,
+	FromBig: MustUint128FromBig, FromFloat64: Uint128FromFloat64, MustFromFloat64: MustUint128FromFloat64,
+	Max:    MaxUint128(),
+	Values: Values128, Pairs: Pairs128,
 	Narrow: narrowUint128,
 	Shifts: Shifts128,
 	BitIdx: []int{0, 1, 63, 64, 126, 127, 128, 191, 192, 255, 256},
@@ -744,6 +760,12 @@ func TestUint128HugeShifts(t *testing.T) { RunHugeShifts(t, kU128) }
 
 // TestUint128PanicText checks that every panic names the method
 func TestUint128PanicText(t *testing.T) { RunPanicText(t, kU128) }
+
+// TestUint128Float checks Float64 and FromFloat64 with big.Float
+func TestUint128Float(t *testing.T) { RunFloat(t, kU128) }
+
+// TestUint128DivFloat checks the rounding of DivToFloat64 with big.Rat
+func TestUint128DivFloat(t *testing.T) { RunDivFloat(t, kU128) }
 
 // TestUint128Constants checks untyped constants as 64-bit operands and shifts
 func TestUint128Constants(t *testing.T) {
@@ -784,3 +806,22 @@ var benchU128 = sync.OnceValue(func() (in struct {
 	in.u128s = b.U128s
 	return
 })
+
+// BenchmarkUint128DivToFloat64 measures DivToFloat64 and DivToFloat64x.
+// big.Rat.Float64 of the same pairs is the baseline, compare by /impl
+func BenchmarkUint128DivToFloat64(b *testing.B) {
+	for _, s := range DivFloatIn(128, false) {
+		x, y := Slice128[Uint128](Low128(s.X)), Slice128[Uint128](Low128(s.Y))
+		b.Run("bits="+s.Name+"/impl=fat", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat = x[i&BenchMask].DivToFloat64(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=fatx", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat, SinkBool = x[i&BenchMask].DivToFloat64x(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=big.Rat", func(b *testing.B) { BenchRatFloat(b, RefU128, x, y) })
+	}
+}

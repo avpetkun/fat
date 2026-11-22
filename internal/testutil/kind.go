@@ -23,6 +23,9 @@ type Num[T any] interface {
 	Max(y T) T
 	Min(y T) T
 	CmpBig(y *big.Int) int
+	Float64() float64
+	DivToFloat64(y T) float64
+	DivToFloat64x(y T) (float64, bool)
 }
 
 // SignNum is Num with Sign
@@ -42,17 +45,20 @@ type SignedNum[T any] interface {
 
 // Kind describes one of the four types for the shared tests
 type Kind[T Num[T]] struct {
-	Name     string
-	Bits     int
-	Signed   bool
-	Ref      func(T) *big.Int
-	Wrap     func(*big.Int) *big.Int
-	Fits     func(*big.Int) bool
-	FromBig  func(*big.Int) T
-	Zero     T
-	Max, Min T
-	Values   func(func(T))
-	Pairs    func(func(x, y T))
+	Name    string
+	Bits    int
+	Signed  bool
+	Ref     func(T) *big.Int
+	Wrap    func(*big.Int) *big.Int
+	Fits    func(*big.Int) bool
+	FromBig func(*big.Int) T
+	// FromFloat64 truncates toward zero
+	FromFloat64     func(float64) (T, bool)
+	MustFromFloat64 func(float64) T
+	Zero            T
+	Max, Min        T
+	Values          func(func(T))
+	Pairs           func(func(x, y T))
 	// Narrow cuts y to width bits and extends it back, by zeros or by its sign
 	Narrow func(y T, width int) T
 	Shifts []int

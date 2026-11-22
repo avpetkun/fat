@@ -33,6 +33,36 @@ func MustUint128FromBig(v *big.Int) Uint128 {
 	return x
 }
 
+// Uint128FromFloat64 returns v truncated toward zero and whether it fits.
+// It returns zero and false for a NaN, for v <= -1 and for v >= 2^128
+func Uint128FromFloat64(v float64) (Uint128, bool) {
+	b := math.Float64bits(v)
+	// the exponent with the sign above it: past 127 for v < 0, Inf and NaN,
+	// and by the wrap for |v| < 1
+	t := b>>52 - 1023
+	if t >= 128 {
+		// |v| < 1 is zero with either sign
+		return Uint128{}, b<<1 < 1023<<53
+	}
+	// the 53 mantissa bits on top of a word: the top one goes to bit t&63,
+	// the bits shifted out go to the limb below
+	h := b<<11 | 1<<63
+	lo, hi := h>>(^t&63), uint64(0)
+	if under := h << 1 << (t & 63); t >= 64 {
+		lo, hi = under, lo
+	}
+	return Uint128{lo, hi}, true
+}
+
+// MustUint128FromFloat64 is Uint128FromFloat64 that panics when v does not fit
+func MustUint128FromFloat64(v float64) Uint128 {
+	x, ok := Uint128FromFloat64(v)
+	if !ok {
+		panic("fat.MustUint128FromFloat64: out of range")
+	}
+	return x
+}
+
 // uint128FromBigErrs are the errors of Uint128FromBig by error bits
 var uint128FromBigErrs = [4]error{
 	1: ErrNegative{"Uint128FromBig", ""},
@@ -159,6 +189,20 @@ func (x Uint128) Int128u() Int128 {
 // Int256 returns x widened to 256 bits
 func (x Uint128) Int256() Int256 {
 	return Int256{x.L0, x.L1, 0, 0}
+}
+
+// Float64 returns the float64 nearest to x, a tie goes to the even one
+func (x Uint128) Float64() float64 {
+	// two 52-bit fields convert exactly and their sum rounds once:
+	// bits 0 to 103 for x < 2^104, else bits 24 to 127,
+	// with the bits under them as sticky bits far below the last place
+	lb, hb := x.L0, x.L0>>52|x.L1<<12
+	lb2, hb2 := x.L0>>24|x.L1<<40|x.L0&0xFFFFFF, x.L1>>12
+	e := uint64(1023 << 52)
+	if x.L1 >= 1<<40 {
+		lb, hb, e = lb2, hb2, (1023+24)<<52
+	}
+	return (float64(int64(hb))*0x1p52 + float64(int64(lb&(1<<52-1)))) * math.Float64frombits(e)
 }
 
 // Big returns x as a new big.Int

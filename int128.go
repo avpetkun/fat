@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"math/bits"
 )
@@ -59,6 +60,40 @@ func MustInt128FromBig(v *big.Int) Int128 {
 	x, ok := int128FromBig(v)
 	if !ok {
 		panic("fat.MustInt128FromBig: out of range")
+	}
+	return x
+}
+
+// Int128FromFloat64 returns v truncated toward zero and whether it fits.
+// It returns zero and false for a NaN, for v < -2^127 and for v >= 2^127
+func Int128FromFloat64(v float64) (Int128, bool) {
+	b := math.Float64bits(v)
+	t := b<<1>>53 - 1023
+	if t >= 127 {
+		// |v| < 1 is zero, only -2^127 fits from that exponent on
+		if b == 0xC7E<<52 {
+			return MinInt128(), true
+		}
+		return Int128{}, b<<1 < 1023<<53
+	}
+	// Uint128FromFloat64 on |v|
+	h := b<<11 | 1<<63
+	lo, hi := h>>(^t&63), uint64(0)
+	if under := h << 1 << (t & 63); t >= 64 {
+		lo, hi = under, lo
+	}
+	// (x ^ m) - m negates for a negative v
+	m := uint64(int64(b) >> 63)
+	r0, c := bits.Sub64(lo^m, m, 0)
+	r1, _ := bits.Sub64(hi^m, m, c)
+	return Int128{r0, r1}, true
+}
+
+// MustInt128FromFloat64 is Int128FromFloat64 that panics when v does not fit
+func MustInt128FromFloat64(v float64) Int128 {
+	x, ok := Int128FromFloat64(v)
+	if !ok {
+		panic("fat.MustInt128FromFloat64: out of range")
 	}
 	return x
 }
@@ -188,6 +223,19 @@ func (x Int128) Uint256o() (r Uint256, overflow bool) {
 func (x Int128) Uint256u() Uint256 {
 	m := uint64(int64(x.L1) >> 63)
 	return Uint256{x.L0, x.L1, m, m}
+}
+
+// Float64 returns the float64 nearest to x, a tie goes to the even one
+func (x Int128) Float64() float64 {
+	// Uint128.Float64 with a signed high field and an unsigned low one:
+	// bits 0 to 103 for -2^104 <= x < 2^104, else 24 to 127 over sticky bits
+	lb, hb := x.L0, int64(x.L0>>52|x.L1<<12)
+	e := uint64(1023 << 52)
+	// lb2 in the if statement is cheaper to inline and still a conditional move
+	if lb2 := x.L0>>24 | x.L1<<40 | x.L0&0xFFFFFF; x.L1+1<<40 >= 1<<41 {
+		lb, hb, e = lb2, int64(x.L1)>>12, (1023+24)<<52
+	}
+	return (float64(hb)*0x1p52 + float64(int64(lb&(1<<52-1)))) * math.Float64frombits(e)
 }
 
 // Big returns x as a new big.Int

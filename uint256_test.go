@@ -802,6 +802,22 @@ func BenchmarkUint256Big(b *testing.B) {
 			sinkU256, _ = Uint256FromBig(x[i&BenchMask])
 		}
 	})
+	b.Run("op=Float64", func(b *testing.B) {
+		x := in.u256
+		for i := range b.N {
+			SinkFloat = x[i&BenchMask].Float64()
+		}
+	})
+	b.Run("op=FromFloat64", func(b *testing.B) {
+		x := make([]float64, len(in.u256))
+		for i, v := range in.u256 {
+			x[i] = v.Float64()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			sinkU256, SinkBool = Uint256FromFloat64(x[i&BenchMask])
+		}
+	})
 }
 
 // narrowUint256 zeroes the limbs of y above width bits
@@ -817,9 +833,9 @@ func narrowUint256(y Uint256, width int) Uint256 {
 var kU256 = Kind[Uint256]{
 	Name: "Uint256", Bits: 256,
 	Ref: RefU256, Wrap: WrapU256, Fits: FitsU256,
-	FromBig: MustUint256FromBig,
-	Max:     MaxUint256(),
-	Values:  Values256, Pairs: Pairs256,
+	FromBig: MustUint256FromBig, FromFloat64: Uint256FromFloat64, MustFromFloat64: MustUint256FromFloat64,
+	Max:    MaxUint256(),
+	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowUint256,
 	Shifts: Shifts256,
 	BitIdx: []int{0, 1, 63, 64, 127, 128, 191, 192, 254, 255, 256, 319, 320, 511, 512},
@@ -853,6 +869,12 @@ func TestUint256HugeShifts(t *testing.T) { RunHugeShifts(t, kU256) }
 
 // TestUint256PanicText checks that every panic names its func or method
 func TestUint256PanicText(t *testing.T) { RunPanicText(t, kU256) }
+
+// TestUint256Float checks Float64 and FromFloat64 against big.Float
+func TestUint256Float(t *testing.T) { RunFloat(t, kU256) }
+
+// TestUint256DivFloat checks DivToFloat64 against big.Rat at rounding ties
+func TestUint256DivFloat(t *testing.T) { RunDivFloat(t, kU256) }
 
 // TestUint256Constants checks that untyped constants compile as operands
 func TestUint256Constants(t *testing.T) {
@@ -913,3 +935,23 @@ var benchU256 = sync.OnceValue(func() (in struct {
 	}
 	return
 })
+
+// BenchmarkUint256DivToFloat64 measures DivToFloat64 and DivToFloat64x
+// next to big.Rat.Float64 on the same pairs by bit length.
+// Compare with benchstat -col /impl
+func BenchmarkUint256DivToFloat64(b *testing.B) {
+	for _, s := range DivFloatIn(256, false) {
+		x, y := Slice256[Uint256](s.X), Slice256[Uint256](s.Y)
+		b.Run("bits="+s.Name+"/impl=fat", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat = x[i&BenchMask].DivToFloat64(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=fatx", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat, SinkBool = x[i&BenchMask].DivToFloat64x(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=big.Rat", func(b *testing.B) { BenchRatFloat(b, RefU256, x, y) })
+	}
+}

@@ -485,14 +485,30 @@ func BenchmarkInt256Convert(b *testing.B) {
 			sinkI256, _ = Int256FromBig(x[i&BenchMask])
 		}
 	})
+	b.Run("op=Float64", func(b *testing.B) {
+		x := in.i256
+		for i := range b.N {
+			SinkFloat = x[i&BenchMask].Float64()
+		}
+	})
+	b.Run("op=FromFloat64", func(b *testing.B) {
+		x := make([]float64, len(in.i256))
+		for i, v := range in.i256 {
+			x[i] = v.Float64()
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			sinkI256, SinkBool = Int256FromFloat64(x[i&BenchMask])
+		}
+	})
 }
 
 // kI256 describes Int256 for the shared tests
 var kI256 = Kind[Int256]{
 	Name: "Int256", Bits: 256, Signed: true,
 	Ref: RefI256, Wrap: WrapI256, Fits: FitsI256,
-	FromBig: MustInt256FromBig,
-	Max:     MaxInt256(), Min: MinInt256(),
+	FromBig: MustInt256FromBig, FromFloat64: Int256FromFloat64, MustFromFloat64: MustInt256FromFloat64,
+	Max: MaxInt256(), Min: MinInt256(),
 	Values: Values256, Pairs: Pairs256,
 	Narrow: narrowInt256,
 	Shifts: Shifts256,
@@ -769,6 +785,12 @@ func TestInt256HugeShifts(t *testing.T) { RunHugeShifts(t, kI256) }
 // TestInt256PanicText checks that every panic names its func or method
 func TestInt256PanicText(t *testing.T) { RunPanicText(t, kI256) }
 
+// TestInt256Float checks Float64 and FromFloat64 against big.Float
+func TestInt256Float(t *testing.T) { RunFloat(t, kI256) }
+
+// TestInt256DivFloat checks DivToFloat64 against big.Rat at rounding ties
+func TestInt256DivFloat(t *testing.T) { RunDivFloat(t, kI256) }
+
 // TestInt256Constants checks that untyped constants of either sign compile
 func TestInt256Constants(t *testing.T) {
 	t.Parallel()
@@ -836,3 +858,23 @@ var benchI256 = sync.OnceValue(func() (in struct {
 	in.i256s = b.I256s
 	return
 })
+
+// BenchmarkInt256DivToFloat64 measures DivToFloat64 and DivToFloat64x
+// next to big.Rat.Float64 on the same pairs by bit length.
+// Compare with benchstat -col /impl
+func BenchmarkInt256DivToFloat64(b *testing.B) {
+	for _, s := range DivFloatIn(256, true) {
+		x, y := Slice256[Int256](s.X), Slice256[Int256](s.Y)
+		b.Run("bits="+s.Name+"/impl=fat", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat = x[i&BenchMask].DivToFloat64(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=fatx", func(b *testing.B) {
+			for i := range b.N {
+				SinkFloat, SinkBool = x[i&BenchMask].DivToFloat64x(y[i&BenchMask])
+			}
+		})
+		b.Run("bits="+s.Name+"/impl=big.Rat", func(b *testing.B) { BenchRatFloat(b, RefI256, x, y) })
+	}
+}

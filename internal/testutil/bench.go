@@ -2,8 +2,10 @@ package testutil
 
 import (
 	"math/big"
+	"math/bits"
 	"math/rand"
 	"sync"
+	"testing"
 )
 
 // compare runs with:
@@ -19,6 +21,7 @@ var (
 	SinkInt64  int64
 	SinkUint   uint
 	SinkUint64 uint64
+	SinkFloat  float64
 	SinkBig    *big.Int
 )
 
@@ -124,4 +127,72 @@ func BoolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// Low128 returns the low 2 limbs of each value
+func Low128(l [][4]uint64) [][2]uint64 {
+	out := make([][2]uint64, len(l))
+	for i, x := range l {
+		out[i] = [2]uint64{x[0], x[1]}
+	}
+	return out
+}
+
+// DivFloatSet is a named set of 2^18 pairs for the DivToFloat64 benchmarks
+type DivFloatSet struct {
+	Name string
+	X, Y [][4]uint64
+}
+
+// DivFloatIn returns the DivToFloat64 sets for w bits by operand length:
+// mixed, exact in a float64, around 2^64, full and with exact quotients.
+// Signed ones get a random sign
+func DivFloatIn(w int, signed bool) []DivFloatSet {
+	r := rand.New(rand.NewSource(5))
+	if signed {
+		w--
+	}
+	gen := func(name string, lo, hi int) DivFloatSet {
+		s := DivFloatSet{Name: name}
+		one := func() [4]uint64 {
+			if n := lo + r.Intn(hi-lo+1); signed {
+				return RandSigned256(r, n)
+			} else {
+				return RandBits(r, n)
+			}
+		}
+		for range BenchMask + 1 {
+			s.X, s.Y = append(s.X, one()), append(s.Y, one())
+		}
+		return s
+	}
+	sets := []DivFloatSet{gen("mixed", 1, w), gen("1-53", 1, 53), gen("49-80", 49, 80), gen("full", w-62, w)}
+	// exact quotients: x = y * k for y of 1 to 63 bits and k of 1 to 53
+	exact := DivFloatSet{Name: "exact"}
+	for range BenchMask + 1 {
+		y, k := RandBits(r, 1+r.Intn(63)), RandBits(r, 1+r.Intn(53))
+		hi, lo := bits.Mul64(y[0], k[0])
+		x := [4]uint64{lo, hi, 0, 0}
+		if signed && r.Intn(2) == 0 {
+			var c uint64
+			x[0], c = bits.Add64(^x[0], 1, 0)
+			x[1], c = bits.Add64(^x[1], 0, c)
+			x[2], c = bits.Add64(^x[2], 0, c)
+			x[3], _ = bits.Add64(^x[3], 0, c)
+		}
+		exact.X, exact.Y = append(exact.X, x), append(exact.Y, y)
+	}
+	return append(sets, exact)
+}
+
+// BenchRatFloat times big.Rat.Float64 of x[i] / y[i], built before the timer
+func BenchRatFloat[T any](b *testing.B, ref func(T) *big.Int, x, y []T) {
+	rats := make([]*big.Rat, len(x))
+	for i := range x {
+		rats[i] = new(big.Rat).SetFrac(ref(x[i]), ref(y[i]))
+	}
+	b.ResetTimer()
+	for i := range b.N {
+		SinkFloat, SinkBool = rats[i&BenchMask].Float64()
+	}
 }

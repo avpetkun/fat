@@ -1,6 +1,7 @@
 package fat
 
 import (
+	"math"
 	"math/big"
 	"math/bits"
 )
@@ -64,6 +65,47 @@ func MustInt256FromBig(v *big.Int) Int256 {
 	x, ok := int256FromBig(v)
 	if !ok {
 		panic("fat.MustInt256FromBig: out of range")
+	}
+	return x
+}
+
+// Int256FromFloat64 returns v truncated toward zero and whether it fits.
+// It returns zero and false for a NaN, for v < -2^255 and for v >= 2^255
+func Int256FromFloat64(v float64) (Int256, bool) {
+	b := math.Float64bits(v)
+	t := b<<1>>53 - 1023
+	if t >= 255 {
+		// |v| < 1 is zero, and -2^255 is the only fit from that exponent on
+		if b == 0xCFE<<52 {
+			return MinInt256(), true
+		}
+		return Int256{}, b<<1 < 1023<<53
+	}
+	// Uint256FromFloat64 on |v|
+	h := b<<11 | 1<<63
+	top, under := h>>(^t&63), h<<1<<(t&63)
+	wm, w0, w1 := under, top, uint64(0)
+	if t&64 != 0 {
+		wm, w0, w1 = 0, under, top
+	}
+	l0, l1, l2, l3 := w0, w1, uint64(0), uint64(0)
+	if t&128 != 0 {
+		l0, l1, l2, l3 = 0, wm, w0, w1
+	}
+	// (x ^ m) - m negates for a negative v
+	m := uint64(int64(b) >> 63)
+	r0, c := bits.Sub64(l0^m, m, 0)
+	r1, c := bits.Sub64(l1^m, m, c)
+	r2, c := bits.Sub64(l2^m, m, c)
+	r3, _ := bits.Sub64(l3^m, m, c)
+	return Int256{r0, r1, r2, r3}, true
+}
+
+// MustInt256FromFloat64 is Int256FromFloat64 that panics when v does not fit
+func MustInt256FromFloat64(v float64) Int256 {
+	x, ok := Int256FromFloat64(v)
+	if !ok {
+		panic("fat.MustInt256FromFloat64: out of range")
 	}
 	return x
 }
@@ -216,6 +258,29 @@ func (x Int256) Uint256o() (r Uint256, overflow bool) {
 // Uint256u returns the bits of x as a Go conversion does
 func (x Int256) Uint256u() Uint256 {
 	return Uint256(x)
+}
+
+// Float64 returns the float64 nearest to x, a tie goes to the even one
+func (x Int256) Float64() float64 {
+	// hi is the top limb other than a sign extension, lo the limb below it.
+	// e is the exponent of their place, the limbs below fold into a sticky bit.
+	// No |x|: the top field is signed, as in Int128.Float64
+	hi, lo, st, e := x.L1, x.L0, uint64(0), uint64(1023<<52)
+	if x.L2 != uint64(int64(x.L1)>>63) {
+		hi, lo, st, e = x.L2, x.L1, x.L0, (1023+64)<<52
+	}
+	if x.L3 != uint64(int64(x.L2)>>63) {
+		hi, lo, st, e = x.L3, x.L2, x.L1|x.L0, (1023+128)<<52
+	}
+	// the sticky bit only comes under two limbs that hold 2^63 or more.
+	// So it is at least 10 bits below the last place
+	lo |= (st | -st) >> 63
+	lb, hb := lo, int64(lo>>52|hi<<12)
+	lb2, hb2 := lo>>24|hi<<40|lo&0xFFFFFF, int64(hi)>>12
+	if hi+1<<40 >= 1<<41 {
+		lb, hb, e = lb2, hb2, e+24<<52
+	}
+	return (float64(hb)*0x1p52 + float64(int64(lb&(1<<52-1)))) * math.Float64frombits(e)
 }
 
 // Big returns x as a new big.Int
